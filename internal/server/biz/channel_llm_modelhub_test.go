@@ -88,7 +88,7 @@ func TestModelHubChannelRejectsUnsupportedCustomEndpoint(t *testing.T) {
 	require.Contains(t, err.Error(), "ModelHub supports only")
 }
 
-func TestModelHubChannelDefaultsAndValidatesBaseURL(t *testing.T) {
+func TestModelHubChannelDefaultsBaseURL(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
 	defer client.Close()
 	ctx := authz.WithTestBypass(context.Background())
@@ -104,7 +104,7 @@ func TestModelHubChannelDefaultsAndValidatesBaseURL(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, modelhub.DefaultBaseURL, created.BaseURL)
 
-	_, err = svc.CreateChannel(ctx, ent.CreateChannelInput{
+	createdWithQuery, err := svc.CreateChannel(ctx, ent.CreateChannelInput{
 		Type:             channel.TypeModelhub,
 		Name:             "ModelHub Query URL Channel",
 		BaseURL:          lo.ToPtr(modelhub.DefaultBaseURL + "?ak=embedded"),
@@ -112,6 +112,6 @@ func TestModelHubChannelDefaultsAndValidatesBaseURL(t *testing.T) {
 		SupportedModels:  []string{"gpt-5.6-sol"},
 		DefaultTestModel: "gpt-5.6-sol",
 	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid ModelHub base URL")
+	require.NoError(t, err)
+	require.Equal(t, modelhub.DefaultBaseURL+"?ak=embedded", createdWithQuery.BaseURL)
 }

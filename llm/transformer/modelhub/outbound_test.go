@@ -16,20 +16,29 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
-func TestNewOutboundTransformerDefaultsAndRejectsURLCredentials(t *testing.T) {
+func TestNewOutboundTransformerDefaultsAndAcceptsBaseURLQuery(t *testing.T) {
 	tr, err := NewOutboundTransformer("", "test-ak")
 	require.NoError(t, err)
 	require.NotNil(t, tr)
 
-	_, err = NewOutboundTransformer("https://example.test/modelhub?ak=embedded", "test-ak")
-	require.Error(t, err)
+	withQuery, err := NewOutboundTransformer("https://example.test/modelhub?region=cn&ak=embedded", "test-ak")
+	require.NoError(t, err)
+	require.NotNil(t, withQuery)
 
-	_, err = NewOutboundTransformer("https://example.test/modelhub#fragment", "test-ak")
-	require.Error(t, err)
-
-	err = ValidateBaseURL("https://example.test/modelhub?ak=secret")
-	require.Error(t, err)
-	require.NotContains(t, err.Error(), "secret")
+	request, err := withQuery.TransformRequest(t.Context(), &llm.Request{
+		Model: "gpt-5.6-sol",
+		Messages: []llm.Message{{
+			Role:    "user",
+			Content: llm.MessageContent{Content: lo.ToPtr("hello")},
+		}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://example.test/modelhub/responses?region=cn", request.URL)
+	require.Equal(t, "test-ak", request.Query.Get(APIKeyQueryParameter))
+	rawRequest, err := httpclient.BuildHttpRequest(t.Context(), request)
+	require.NoError(t, err)
+	require.Equal(t, "cn", rawRequest.URL.Query().Get("region"))
+	require.Equal(t, "test-ak", rawRequest.URL.Query().Get(APIKeyQueryParameter))
 }
 
 func TestTransformRequestAddsModelHubAuthAndEnvelope(t *testing.T) {

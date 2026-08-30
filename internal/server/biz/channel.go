@@ -575,12 +575,6 @@ func (svc *ChannelService) createChannel(ctx context.Context, input ent.CreateCh
 			return nil, fmt.Errorf("invalid endpoints: %w", err)
 		}
 	}
-	if input.Type == channel.TypeModelhub && input.BaseURL != nil {
-		if err := modelhub.ValidateBaseURL(*input.BaseURL); err != nil {
-			return nil, fmt.Errorf("invalid ModelHub base URL: %w", err)
-		}
-	}
-
 	createBuilder := svc.entFromContext(ctx).Channel.Create().
 		SetType(input.Type).
 		SetNillableBaseURL(input.BaseURL).
@@ -887,17 +881,6 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 				Only(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to load channel provider identity: %w", err)
-			}
-		}
-		if input.BaseURL != nil {
-			effectiveType := input.Type
-			if effectiveType == nil && existingIdentity != nil {
-				effectiveType = &existingIdentity.Type
-			}
-			if effectiveType != nil && *effectiveType == channel.TypeModelhub {
-				if err := modelhub.ValidateBaseURL(*input.BaseURL); err != nil {
-					return fmt.Errorf("invalid ModelHub base URL: %w", err)
-				}
 			}
 		}
 		if input.Endpoints != nil && input.Type == nil && existingIdentity != nil {

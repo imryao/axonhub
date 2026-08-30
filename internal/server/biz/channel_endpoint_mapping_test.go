@@ -286,10 +286,10 @@ func TestValidateEndpointsForChannelType_ModelHub(t *testing.T) {
 		APIFormat: llm.APIFormatOpenAIResponse.String(),
 		Transport: objects.ChannelEndpointTransportWebSocket,
 	}}), "do not support websocket")
-	require.ErrorContains(t, ValidateEndpointsForChannelType(channel.TypeModelhub, []objects.ChannelEndpoint{{
+	require.NoError(t, ValidateEndpointsForChannelType(channel.TypeModelhub, []objects.ChannelEndpoint{{
 		APIFormat: llm.APIFormatOpenAIResponse.String(),
 		BaseURL:   "https://example.test/online?ak=embedded",
-	}}), "invalid ModelHub base URL")
+	}}))
 }
 
 func TestPrimaryEndpointTransport(t *testing.T) {

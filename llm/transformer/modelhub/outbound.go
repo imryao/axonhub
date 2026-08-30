@@ -105,10 +105,9 @@ func NewOutboundTransformerWithConfig(config *Config) (*OutboundTransformer, err
 		return nil, fmt.Errorf("API key provider is required")
 	}
 
-	baseURL := strings.TrimRight(strings.TrimSpace(config.BaseURL), "/")
-	baseURL, err := normalizeAndValidateBaseURL(baseURL)
-	if err != nil {
-		return nil, err
+	baseURL := strings.TrimSpace(config.BaseURL)
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
 	}
 
 	configuredEndpointPath := strings.TrimSpace(config.EndpointPath)
@@ -137,34 +136,50 @@ func NewOutboundTransformerWithConfig(config *Config) (*OutboundTransformer, err
 	}, nil
 }
 
-// ValidateBaseURL validates a ModelHub base URL without constructing a
-// transformer. It is used by channel persistence validation so malformed URLs
-// fail at configuration time rather than only when the channel cache reloads.
-func ValidateBaseURL(baseURL string) error {
-	_, err := normalizeAndValidateBaseURL(baseURL)
-	return err
-}
-
-func normalizeAndValidateBaseURL(rawURL string) (string, error) {
-	baseURL := strings.TrimRight(strings.TrimSpace(rawURL), "/")
-	if baseURL == "" {
-		baseURL = DefaultBaseURL
+// buildEndpointURL joins the configured ModelHub base URL and endpoint path.
+// Parsing before joining keeps a query in the base URL in its proper place
+// (rather than producing "...?key=value/responses"), and removes any stale
+// spelling of the AK query key before TransformRequest adds the channel key.
+func (t *OutboundTransformer) buildEndpointURL(requestType llm.RequestType) (string, error) {
+	if t == nil {
+		return "", fmt.Errorf("ModelHub transformer is nil")
 	}
 
-	parsed, err := url.Parse(baseURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("invalid ModelHub base URL")
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("ModelHub base URL must use http or https")
-	}
-	// Keeping credentials out of the URL prevents accidental persistence in
-	// channel metadata, request errors, and proxy logs.
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(baseURL, "#") || parsed.Opaque != "" {
-		return "", fmt.Errorf("ModelHub base URL must not contain userinfo, query, or fragment")
+	base, err := url.Parse(t.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid ModelHub base URL: %w", err)
 	}
 
-	return baseURL, nil
+	endpointPath := t.endpointPath
+	if endpointPath == "" {
+		endpointPath = DefaultEndpointPath
+		if requestType == llm.RequestTypeCompact {
+			endpointPath += "/compact"
+		}
+	}
+
+	endpoint, err := url.Parse(endpointPath)
+	if err != nil || endpoint.IsAbs() || endpoint.Host != "" || endpoint.User != nil || !strings.HasPrefix(endpoint.Path, "/") {
+		return "", fmt.Errorf("invalid ModelHub endpoint path")
+	}
+	if strings.Contains(endpoint.Path, "..") || strings.ContainsAny(endpointPath, "?#") {
+		return "", fmt.Errorf("invalid ModelHub endpoint path")
+	}
+
+	base.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(endpoint.Path, "/")
+	base.RawPath = ""
+	query := base.Query()
+	for key := range query {
+		if strings.EqualFold(key, APIKeyQueryParameter) {
+			delete(query, key)
+		}
+	}
+	base.RawQuery = query.Encode()
+	base.ForceQuery = false
+	base.Fragment = ""
+	base.RawFragment = ""
+
+	return base.String(), nil
 }
 
 // TransformRequest adds ModelHub's query authentication and tracing envelope
@@ -187,6 +202,11 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	if err != nil {
 		return nil, err
 	}
+	endpointURL, err := t.buildEndpointURL(llmReq.RequestType)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.URL = endpointURL
 
 	logID := validCorrelationID(httpReq.RequestID)
 	if logID == "" && llmReq != nil && llmReq.RawRequest != nil {
@@ -236,13 +256,6 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		return nil, err
 	}
 	httpReq.JSONBody = append([]byte(nil), httpReq.Body...)
-
-	// The Responses transformer has a fixed compact path. Honour a channel
-	// endpoint override when one was explicitly configured, while retaining
-	// /responses/compact as the native default for compact requests.
-	if llmReq != nil && llmReq.RequestType == llm.RequestTypeCompact && t.endpointPath != "" {
-		httpReq.URL = t.baseURL + t.endpointPath
-	}
 
 	return httpReq, nil
 }

@@ -8,7 +8,6 @@ import (
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/transformer/gemini"
-	"github.com/looplj/axonhub/llm/transformer/modelhub"
 )
 
 // SupportedAPIFormats lists the API formats that are recognized as valid endpoint api_format values.
@@ -96,11 +95,6 @@ func ValidateEndpointsForChannelType(typ channel.Type, endpoints []objects.Chann
 			strings.HasPrefix(strings.ToLower(strings.TrimSpace(endpoint.BaseURL)), "ws://") ||
 			strings.HasPrefix(strings.ToLower(strings.TrimSpace(endpoint.BaseURL)), "wss://") {
 			return fmt.Errorf("endpoint[%d]: ModelHub endpoints do not support websocket transport", i)
-		}
-		if endpoint.BaseURL != "" {
-			if err := modelhub.ValidateBaseURL(endpoint.BaseURL); err != nil {
-				return fmt.Errorf("endpoint[%d]: invalid ModelHub base URL: %w", i, err)
-			}
 		}
 	}
 
