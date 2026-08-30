@@ -47,6 +47,14 @@ func TestDefaultEndpointsForChannelType_UseLLMAPIFormatValues(t *testing.T) {
 			},
 		},
 		{
+			name: "modelhub exposes native responses and compact endpoints",
+			typ:  channel.TypeModelhub,
+			expected: []string{
+				llm.APIFormatOpenAIResponse.String(),
+				llm.APIFormatOpenAIResponseCompact.String(),
+			},
+		},
+		{
 			name: "qiniu exposes openai chat completions",
 			typ:  channel.TypeQiniu,
 			expected: []string{
@@ -265,6 +273,23 @@ func TestValidateEndpoints(t *testing.T) {
 		err := ValidateEndpoints(nil)
 		require.NoError(t, err)
 	})
+}
+
+func TestValidateEndpointsForChannelType_ModelHub(t *testing.T) {
+	require.NoError(t, ValidateEndpointsForChannelType(channel.TypeModelhub, []objects.ChannelEndpoint{{
+		APIFormat: llm.APIFormatOpenAIResponse.String(),
+	}}))
+	require.ErrorContains(t, ValidateEndpointsForChannelType(channel.TypeModelhub, []objects.ChannelEndpoint{{
+		APIFormat: llm.APIFormatOpenAIChatCompletion.String(),
+	}}), "ModelHub supports only")
+	require.ErrorContains(t, ValidateEndpointsForChannelType(channel.TypeModelhub, []objects.ChannelEndpoint{{
+		APIFormat: llm.APIFormatOpenAIResponse.String(),
+		Transport: objects.ChannelEndpointTransportWebSocket,
+	}}), "do not support websocket")
+	require.ErrorContains(t, ValidateEndpointsForChannelType(channel.TypeModelhub, []objects.ChannelEndpoint{{
+		APIFormat: llm.APIFormatOpenAIResponse.String(),
+		BaseURL:   "https://example.test/online?ak=embedded",
+	}}), "invalid ModelHub base URL")
 }
 
 func TestPrimaryEndpointTransport(t *testing.T) {

@@ -202,6 +202,7 @@ type Type string
 const (
 	TypeOpenai              Type = "openai"
 	TypeOpenaiResponses     Type = "openai_responses"
+	TypeModelhub            Type = "modelhub"
 	TypeAtlascloud          Type = "atlascloud"
 	TypeCline               Type = "cline"
 	TypeCodex               Type = "codex"
@@ -274,7 +275,7 @@ func (_type Type) String() string {
 // TypeValidator is a validator for the "type" field enum values. It is called by the builders before save.
 func TypeValidator(_type Type) error {
 	switch _type {
-	case TypeOpenai, TypeOpenaiResponses, TypeAtlascloud, TypeCline, TypeCodex, TypeVercel, TypeAnthropic, TypeAnthropicAWS, TypeAnthropicGcp, TypeGeminiOpenai, TypeGemini, TypeGeminiVertex, TypeDeepseek, TypeDeepseekAnthropic, TypeDeepinfra, TypeQiniu, TypeFireworks, TypeDoubao, TypeDoubaoAnthropic, TypeMoonshot, TypeMoonshotAnthropic, TypeZhipu, TypeZai, TypeZhipuAnthropic, TypeZaiAnthropic, TypeAnthropicFake, TypeOpenaiFake, TypeOpenrouter, TypeXiaomi, TypeXiaomiAnthropic, TypeXai, TypeXaiResponses, TypeXaiSubscription, TypePpio, TypeSiliconflow, TypeVolcengine, TypeVolcengineAnthropic, TypeLongcat, TypeLongcatAnthropic, TypeMinimax, TypeMinimaxAnthropic, TypeAihubmix, TypeAihubmixAnthropic, TypeBurncloud, TypeModelscope, TypeBailian, TypeBailianAnthropic, TypeMoonshotCoding, TypeJina, TypeGithub, TypeGithubCopilot, TypeClaudecode, TypeCerebras, TypeAntigravity, TypeNanogpt, TypeNanogptResponses, TypeOpencodeGo, TypeOpencodeGoAnthropic, TypeOllama, TypeOllamaAnthropic, TypeEvolink, TypeEvolinkAnthropic, TypeGroq, TypeQiniuAnthropic, TypeFenno:
+	case TypeOpenai, TypeOpenaiResponses, TypeModelhub, TypeAtlascloud, TypeCline, TypeCodex, TypeVercel, TypeAnthropic, TypeAnthropicAWS, TypeAnthropicGcp, TypeGeminiOpenai, TypeGemini, TypeGeminiVertex, TypeDeepseek, TypeDeepseekAnthropic, TypeDeepinfra, TypeQiniu, TypeFireworks, TypeDoubao, TypeDoubaoAnthropic, TypeMoonshot, TypeMoonshotAnthropic, TypeZhipu, TypeZai, TypeZhipuAnthropic, TypeZaiAnthropic, TypeAnthropicFake, TypeOpenaiFake, TypeOpenrouter, TypeXiaomi, TypeXiaomiAnthropic, TypeXai, TypeXaiResponses, TypeXaiSubscription, TypePpio, TypeSiliconflow, TypeVolcengine, TypeVolcengineAnthropic, TypeLongcat, TypeLongcatAnthropic, TypeMinimax, TypeMinimaxAnthropic, TypeAihubmix, TypeAihubmixAnthropic, TypeBurncloud, TypeModelscope, TypeBailian, TypeBailianAnthropic, TypeMoonshotCoding, TypeJina, TypeGithub, TypeGithubCopilot, TypeClaudecode, TypeCerebras, TypeAntigravity, TypeNanogpt, TypeNanogptResponses, TypeOpencodeGo, TypeOpencodeGoAnthropic, TypeOllama, TypeOllamaAnthropic, TypeEvolink, TypeEvolinkAnthropic, TypeGroq, TypeQiniuAnthropic, TypeFenno:
 		return nil
 	default:
 		return fmt.Errorf("channel: invalid enum value for type field: %q", _type)

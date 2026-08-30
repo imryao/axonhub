@@ -209,6 +209,11 @@ var blockedHeaders = map[string]bool{
 	"Ah-Trace-Id":  true,
 	"Ah-Thread-Id": true,
 
+	// Native ModelHub correlation headers are owned by its outbound transformer;
+	// forwarding client copies would let them diverge from the JSON envelope.
+	"X-Tt-Logid": true,
+	"Extra":      true,
+
 	// X-Initiator is used by specific channels (e.g. Copilot) for billing control.
 	// Block from auto-merge so it is only forwarded by the channel that explicitly needs it.
 	"X-Initiator": true,
@@ -226,9 +231,12 @@ func isBlockedHeader(key string) bool {
 	if blockedHeaders[key] {
 		return true
 	}
+	if canonical := http.CanonicalHeaderKey(key); blockedHeaders[canonical] {
+		return true
+	}
 
 	for _, prefix := range blockedHeaderPrefixes {
-		if strings.HasPrefix(key, prefix) {
+		if strings.HasPrefix(key, prefix) || strings.HasPrefix(http.CanonicalHeaderKey(key), prefix) {
 			return true
 		}
 	}

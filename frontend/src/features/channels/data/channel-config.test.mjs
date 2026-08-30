@@ -40,6 +40,25 @@ test('Qiniu exposes OpenAI and Anthropic channel variants after AtlasCloud', () 
   assert.ok(providersConfig.indexOf('atlascloud:') < providersConfig.indexOf('qiniu:'));
 });
 
+test('ModelHub exposes a native Responses channel with localized labels', () => {
+  const schema = read('features/channels/data/schema.ts');
+  const channelsConfig = read('features/channels/data/config_channels.ts');
+  const providersConfig = read('features/channels/data/config_providers.ts');
+
+  assert.match(schema, /channelTypeSchema[\s\S]*'modelhub'/);
+  assert.match(
+    channelsConfig,
+    /modelhub:\s*{[\s\S]*baseURL:\s*'https:\/\/aidp\.bytedance\.net\/api\/modelhub\/online'[\s\S]*apiFormat:\s*OPENAI_RESPONSES/
+  );
+  assert.match(providersConfig, /modelhub:\s*{[\s\S]*channelTypes:\s*\[\s*'modelhub'\s*\]/);
+
+  for (const locale of ['en', 'zh-CN']) {
+    const messages = parseLocale(locale);
+    assert.equal(messages['channels.types.modelhub'], 'ModelHub');
+    assert.equal(messages['channels.providers.modelhub'], 'ModelHub');
+  }
+});
+
 test('Fenno exposes a third-party Codex channel', () => {
   const schema = read('features/channels/data/schema.ts');
   const channelsConfig = read('features/channels/data/config_channels.ts');

@@ -22,6 +22,7 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/antigravity"
 	"github.com/looplj/axonhub/llm/transformer/cline"
 	"github.com/looplj/axonhub/llm/transformer/gemini/vertex"
+	"github.com/looplj/axonhub/llm/transformer/modelhub"
 	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 	"github.com/looplj/axonhub/llm/transformer/openai/copilot"
 	"github.com/looplj/axonhub/llm/transformer/xai/subscription"
@@ -194,6 +195,8 @@ func (f *ModelFetcher) getDefaultModelsByType(ctx context.Context, typ channel.T
 		return f.fetchCopilotModels(ctx)
 	case channel.TypeGeminiVertex:
 		return f.fetchGeminiVertexModels(ctx)
+	case channel.TypeModelhub:
+		return lo.Map(modelhub.DefaultModels(), func(id string, _ int) ModelIdentify { return ModelIdentify{ID: id} })
 	default:
 		return nil
 	}
@@ -410,6 +413,15 @@ func (f *ModelFetcher) FetchModels(ctx context.Context, input FetchModelsInput) 
 	}
 
 	channelType := channel.Type(input.ChannelType)
+
+	// ModelHub exposes a native Responses endpoint rather than the standard
+	// OpenAI /v1/models catalog. Keep model discovery deterministic and avoid
+	// sending the ModelHub AK as a Bearer token to a non-existent catalog route.
+	if channelType == channel.TypeModelhub {
+		return &FetchModelsResult{
+			Models: f.getDefaultModelsByType(ctx, channelType),
+		}, nil
+	}
 
 	if apiKey == "" {
 		if isQiniuChannelType(channelType) {

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/enttest"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/transformer/modelhub"
 	"github.com/looplj/axonhub/llm/transformer/xai/subscription"
 )
 
@@ -31,6 +33,19 @@ func TestModelFetcher_getDefaultModelsByType_returns_xAI_subscription_models(t *
 	// Then
 	require.Len(t, models, len(subscription.DefaultModels()))
 	require.Equal(t, subscription.DefaultModels()[0], models[0].ID)
+}
+
+func TestModelFetcher_ModelHubUsesStaticModelsWithoutCatalogRequest(t *testing.T) {
+	fetcher := NewModelFetcher(httpclient.NewHttpClient(), nil)
+
+	result, err := fetcher.FetchModels(t.Context(), FetchModelsInput{
+		ChannelType: channel.TypeModelhub.String(),
+		BaseURL:     modelhub.DefaultBaseURL,
+		APIKey:      lo.ToPtr("modelhub-ak"),
+	})
+	require.NoError(t, err)
+	require.Nil(t, result.Error)
+	require.Equal(t, modelhub.DefaultModels(), lo.Map(result.Models, func(item ModelIdentify, _ int) string { return item.ID }))
 }
 
 // setupProviderConfMockServer creates a mock HTTP server returning provider conf JSON.

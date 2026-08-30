@@ -8,6 +8,7 @@ import (
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/transformer/gemini"
+	"github.com/looplj/axonhub/llm/transformer/modelhub"
 )
 
 // SupportedAPIFormats lists the API formats that are recognized as valid endpoint api_format values.
@@ -75,6 +76,37 @@ func ValidateEndpoints(endpoints []objects.ChannelEndpoint) error {
 	return nil
 }
 
+// ValidateEndpointsForChannelType applies provider-specific endpoint limits
+// after the generic endpoint shape has been validated. Native ModelHub only
+// exposes the Responses and Responses Compact HTTP APIs; accepting another
+// format would otherwise persist a channel that cannot be built at runtime.
+func ValidateEndpointsForChannelType(typ channel.Type, endpoints []objects.ChannelEndpoint) error {
+	if typ != channel.TypeModelhub {
+		return nil
+	}
+
+	for i, endpoint := range endpoints {
+		if endpoint.APIFormat != llm.APIFormatOpenAIResponse.String() && endpoint.APIFormat != llm.APIFormatOpenAIResponseCompact.String() {
+			return fmt.Errorf("endpoint[%d]: ModelHub supports only api_format %q or %q", i, llm.APIFormatOpenAIResponse.String(), llm.APIFormatOpenAIResponseCompact.String())
+		}
+		if strings.Contains(endpoint.Path, "..") || strings.ContainsAny(endpoint.Path, "?#") {
+			return fmt.Errorf("endpoint[%d]: ModelHub endpoint path must not contain traversal, query, or fragment", i)
+		}
+		if endpoint.Transport == objects.ChannelEndpointTransportWebSocket ||
+			strings.HasPrefix(strings.ToLower(strings.TrimSpace(endpoint.BaseURL)), "ws://") ||
+			strings.HasPrefix(strings.ToLower(strings.TrimSpace(endpoint.BaseURL)), "wss://") {
+			return fmt.Errorf("endpoint[%d]: ModelHub endpoints do not support websocket transport", i)
+		}
+		if endpoint.BaseURL != "" {
+			if err := modelhub.ValidateBaseURL(endpoint.BaseURL); err != nil {
+				return fmt.Errorf("endpoint[%d]: invalid ModelHub base URL: %w", i, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 func supportsWebSocketTransport(apiFormat string) bool {
 	return apiFormat == llm.APIFormatOpenAIResponse.String() || apiFormat == llm.APIFormatOpenAIResponseCompact.String()
 }
@@ -118,10 +150,14 @@ var openAIChatOnlyDefaultEndpoints = []objects.ChannelEndpoint{
 var defaultEndpointsForChannelType = map[channel.Type][]objects.ChannelEndpoint{
 	channel.TypeOpenai:          openAIFullDefaultEndpoints,
 	channel.TypeOpenaiResponses: {{APIFormat: llm.APIFormatOpenAIResponse.String()}},
-	channel.TypeAtlascloud:      openAICompatibleDefaultEndpoints,
-	channel.TypeQiniu:           {{APIFormat: llm.APIFormatOpenAIChatCompletion.String()}},
-	channel.TypeQiniuAnthropic:  {{APIFormat: llm.APIFormatAnthropicMessage.String()}},
-	channel.TypeCline:           openAIChatOnlyDefaultEndpoints,
+	channel.TypeModelhub: {
+		{APIFormat: llm.APIFormatOpenAIResponse.String()},
+		{APIFormat: llm.APIFormatOpenAIResponseCompact.String()},
+	},
+	channel.TypeAtlascloud:     openAICompatibleDefaultEndpoints,
+	channel.TypeQiniu:          {{APIFormat: llm.APIFormatOpenAIChatCompletion.String()}},
+	channel.TypeQiniuAnthropic: {{APIFormat: llm.APIFormatAnthropicMessage.String()}},
+	channel.TypeCline:          openAIChatOnlyDefaultEndpoints,
 	channel.TypeCodex: {
 		{APIFormat: llm.APIFormatOpenAIResponse.String()},
 		{APIFormat: llm.APIFormatOpenAIAlphaSearch.String()},

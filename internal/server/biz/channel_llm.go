@@ -32,6 +32,7 @@ import (
 	geminioai "github.com/looplj/axonhub/llm/transformer/gemini/openai"
 	"github.com/looplj/axonhub/llm/transformer/jina"
 	"github.com/looplj/axonhub/llm/transformer/longcat"
+	"github.com/looplj/axonhub/llm/transformer/modelhub"
 	"github.com/looplj/axonhub/llm/transformer/modelscope"
 	"github.com/looplj/axonhub/llm/transformer/moonshot"
 	"github.com/looplj/axonhub/llm/transformer/nanogpt"
@@ -363,6 +364,15 @@ func (svc *ChannelService) buildNonDefaultEndpointOutbound(
 	ch *Channel,
 	ep objects.ChannelEndpoint,
 ) (transformer.Outbound, error) {
+	if c.Type == channel.TypeModelhub &&
+		ep.APIFormat != llm.APIFormatOpenAIResponse.String() &&
+		ep.APIFormat != llm.APIFormatOpenAIResponseCompact.String() {
+		return nil, fmt.Errorf("ModelHub supports only %q and %q endpoints", llm.APIFormatOpenAIResponse.String(), llm.APIFormatOpenAIResponseCompact.String())
+	}
+	if c.Type == channel.TypeModelhub && endpointTransport(ep) == objects.ChannelEndpointTransportWebSocket {
+		return nil, fmt.Errorf("ModelHub endpoints use HTTP streaming and do not support websocket transport")
+	}
+
 	apiKeyProvider := func() auth.APIKeyProvider {
 		return getAPIKeyProvider(ch)
 	}
@@ -398,6 +408,14 @@ func (svc *ChannelService) buildNonDefaultEndpointOutbound(
 		})
 	case llm.APIFormatOpenAIResponse.String(),
 		llm.APIFormatOpenAIResponseCompact.String():
+		if c.Type == channel.TypeModelhub {
+			return modelhub.NewOutboundTransformerWithConfig(&modelhub.Config{
+				BaseURL:        baseURL,
+				EndpointPath:   ep.Path,
+				APIKeyProvider: apiKeyProvider(),
+			})
+		}
+
 		transport := endpointTransport(ep)
 		if (c.Type == channel.TypeCodex || c.Type == channel.TypeFenno) && ep.APIFormat == llm.APIFormatOpenAIResponse.String() {
 			return svc.buildCodexOutbound(c, ch, baseURL, transport, "", ch.HTTPClient)
@@ -990,6 +1008,18 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel, apiKeyOve
 		}
 
 		ch.Outbound = transformer
+
+		return ch, nil
+	case channel.TypeModelhub:
+		modelhubTransformer, err := modelhub.NewOutboundTransformerWithConfig(&modelhub.Config{
+			BaseURL:        c.BaseURL,
+			APIKeyProvider: getAPIKeyProvider(ch),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ModelHub outbound transformer: %w", err)
+		}
+
+		ch.Outbound = modelhubTransformer
 
 		return ch, nil
 	case channel.TypeGithubCopilot:

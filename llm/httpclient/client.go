@@ -226,7 +226,7 @@ func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, erro
 
 	rawResp, err := hc.client.Do(rawReq)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, wrapRequestError("HTTP request failed", err, rawReq.URL, request.SensitiveQueryParameters)
 	}
 
 	defer func() {
@@ -257,7 +257,7 @@ func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, erro
 
 		return nil, &Error{
 			Method:     rawReq.Method,
-			URL:        rawReq.URL.String(),
+			URL:        urlForError(rawReq.URL, request.SensitiveQueryParameters),
 			StatusCode: rawResp.StatusCode,
 			Status:     rawResp.Status,
 			Body:       body,
@@ -317,7 +317,7 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 	// Execute request
 	rawResp, err := hc.client.Do(rawReq)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP stream request failed: %w", err)
+		return nil, wrapRequestError("HTTP stream request failed", err, rawReq.URL, request.SensitiveQueryParameters)
 	}
 
 	// Check for HTTP errors before creating stream
@@ -345,7 +345,7 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 
 		return nil, &Error{
 			Method:     rawReq.Method,
-			URL:        rawReq.URL.String(),
+			URL:        urlForError(rawReq.URL, request.SensitiveQueryParameters),
 			StatusCode: rawResp.StatusCode,
 			Status:     rawResp.Status,
 			Body:       body,
@@ -388,6 +388,78 @@ func urlForLog(value *url.URL) string {
 	redacted.ForceQuery = false
 	redacted.Fragment = ""
 	return redacted.String()
+}
+
+func urlForError(value *url.URL, sensitiveQueryParameters []string) string {
+	if value == nil {
+		return ""
+	}
+	if len(sensitiveQueryParameters) == 0 {
+		return value.String()
+	}
+
+	redacted := *value
+	query := redacted.Query()
+	changed := false
+	for key, values := range query {
+		for _, sensitive := range sensitiveQueryParameters {
+			if strings.EqualFold(key, sensitive) {
+				query[key] = make([]string, len(values))
+				for i := range query[key] {
+					query[key][i] = "<redacted>"
+				}
+				changed = true
+				break
+			}
+		}
+	}
+	if changed {
+		redacted.RawQuery = query.Encode()
+	}
+
+	return redacted.String()
+}
+
+type requestError struct {
+	message string
+	cause   error
+}
+
+func (e *requestError) Error() string {
+	return e.message
+}
+
+func (e *requestError) Unwrap() error {
+	return e.cause
+}
+
+func wrapRequestError(prefix string, cause error, requestURL *url.URL, sensitiveQueryParameters []string) error {
+	if cause == nil {
+		return fmt.Errorf("%s", prefix)
+	}
+	if len(sensitiveQueryParameters) == 0 || requestURL == nil {
+		return fmt.Errorf("%s: %w", prefix, cause)
+	}
+
+	message := cause.Error()
+	originalURL := requestURL.String()
+	redactedURL := urlForError(requestURL, sensitiveQueryParameters)
+	redactedCause := cause
+	var urlErr *url.Error
+	if errors.As(cause, &urlErr) {
+		cloned := *urlErr
+		cloned.URL = redactedURL
+		redactedCause = &cloned
+		message = redactedCause.Error()
+	}
+	if originalURL != "" && originalURL != redactedURL {
+		message = strings.ReplaceAll(message, originalURL, redactedURL)
+	}
+
+	return &requestError{
+		message: fmt.Sprintf("%s: %s", prefix, message),
+		cause:   redactedCause,
+	}
 }
 
 // BuildHttpRequest builds an HTTP request from Request.

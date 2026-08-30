@@ -31,6 +31,12 @@ type Request struct {
 	// Authentication
 	Auth *AuthConfig `json:"auth,omitempty"`
 
+	// SensitiveQueryParameters lists query keys whose values must be redacted
+	// from transport errors and diagnostics. The actual request still carries
+	// the values; this only prevents credentials from being persisted in an
+	// httpclient.Error or log message.
+	SensitiveQueryParameters []string `json:"-"`
+
 	// Request tracking
 	RequestID string `json:"request_id"`
 	ClientIP  string `json:"client_ip"`

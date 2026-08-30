@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -815,6 +816,44 @@ func TestHttpClientImpl_extractHeaders(t *testing.T) {
 	if _, exists := result["Empty-Header"]; exists {
 		t.Errorf("extractHeaders() should not include headers with empty values")
 	}
+}
+
+func TestURLForErrorRedactsSensitiveQueryParameters(t *testing.T) {
+	parsed, err := url.Parse("https://example.test/responses?ak=secret&region=cn&AK=second")
+	require.NoError(t, err)
+
+	redacted := urlForError(parsed, []string{"ak"})
+	require.NotContains(t, redacted, "secret")
+	require.NotContains(t, redacted, "second")
+	require.Contains(t, redacted, "ak=%3Credacted%3E")
+	require.Contains(t, redacted, "AK=%3Credacted%3E")
+	require.Contains(t, redacted, "region=cn")
+	// The helper must not mutate the URL used for the actual request.
+	require.Equal(t, "secret", parsed.Query().Get("ak"))
+}
+
+func TestHttpClient_DoRedactsSensitiveQueryParametersFromTransportErrors(t *testing.T) {
+	cause := errors.New("dial failed")
+	client := NewHttpClientWithClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, &url.Error{Op: req.Method, URL: req.URL.String(), Err: cause}
+	})})
+
+	_, err := client.Do(context.Background(), &Request{
+		Method:                   http.MethodPost,
+		URL:                      "https://example.test/responses",
+		Query:                    url.Values{"ak": {"secret"}},
+		SensitiveQueryParameters: []string{"ak"},
+	})
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "secret")
+	require.Contains(t, err.Error(), "ak=%3Credacted%3E")
+	require.ErrorIs(t, err, cause)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // Test SSE Stream implementation.

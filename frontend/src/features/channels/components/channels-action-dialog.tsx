@@ -2272,6 +2272,11 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                                 }
                                 {...field}
                               />
+                              {activeChannelType === 'modelhub' && (
+                                <p className='text-muted-foreground text-xs'>
+                                  {t('channels.dialogs.fields.baseURL.modelhubHint')}
+                                </p>
+                              )}
                               <FormMessage />
                             </div>
                           </FormItem>

@@ -121,6 +121,21 @@ export const CHANNEL_CONFIGS: Record<ChannelType, ChannelConfig> = {
     color: 'bg-green-100 text-green-800 border-green-200',
     icon: OpenAI,
   },
+  modelhub: {
+    channelType: 'modelhub',
+    baseURL: 'https://aidp.bytedance.net/api/modelhub/online',
+    defaultModels: [
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+      'gpt-5.5-2026-04-24',
+      'gpt-5.4-2026-03-05',
+      'gpt-5.2-2025-12-11',
+    ],
+    apiFormat: OPENAI_RESPONSES,
+    color: 'bg-violet-100 text-violet-800 border-violet-200',
+    icon: OpenAI,
+  },
   codex: {
     channelType: 'codex',
     baseURL: 'https://chatgpt.com/backend-api/codex#',
@@ -823,6 +838,7 @@ export const getDefaultModels = (channelType: ChannelType): string[] => {
  */
 export type Provider =
   | 'openai'
+  | 'modelhub'
   | 'atlascloud'
   | 'qiniu'
   | 'fenno'
@@ -869,6 +885,7 @@ export type Provider =
 export const CHANNEL_TYPE_TO_PROVIDER: Record<ChannelType, Provider> = {
   openai: 'openai',
   openai_responses: 'openai',
+  modelhub: 'modelhub',
   atlascloud: 'atlascloud',
   qiniu: 'qiniu',
   qiniu_anthropic: 'qiniu',

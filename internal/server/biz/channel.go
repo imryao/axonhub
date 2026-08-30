@@ -26,6 +26,7 @@ import (
 	"github.com/looplj/axonhub/internal/server/scheduler"
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/transformer"
+	"github.com/looplj/axonhub/llm/transformer/modelhub"
 	xaisubscription "github.com/looplj/axonhub/llm/transformer/xai/subscription"
 )
 
@@ -532,6 +533,9 @@ func (svc *ChannelService) createChannel(ctx context.Context, input ent.CreateCh
 		officialBaseURL := xaisubscription.DefaultBaseURL
 		input.BaseURL = &officialBaseURL
 		input.Endpoints = nil
+	} else if input.Type == channel.TypeModelhub && (input.BaseURL == nil || strings.TrimSpace(*input.BaseURL) == "") {
+		defaultBaseURL := modelhub.DefaultBaseURL
+		input.BaseURL = &defaultBaseURL
 	}
 	if err := NormalizeAPIKeyAutoDisableRules(input.Policies); err != nil {
 		return nil, err
@@ -566,6 +570,14 @@ func (svc *ChannelService) createChannel(ctx context.Context, input ent.CreateCh
 	if input.Endpoints != nil {
 		if err := ValidateEndpoints(input.Endpoints); err != nil {
 			return nil, fmt.Errorf("invalid endpoints: %w", err)
+		}
+		if err := ValidateEndpointsForChannelType(input.Type, input.Endpoints); err != nil {
+			return nil, fmt.Errorf("invalid endpoints: %w", err)
+		}
+	}
+	if input.Type == channel.TypeModelhub && input.BaseURL != nil {
+		if err := modelhub.ValidateBaseURL(*input.BaseURL); err != nil {
+			return nil, fmt.Errorf("invalid ModelHub base URL: %w", err)
 		}
 	}
 
@@ -792,6 +804,9 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 	if input.Type != nil && *input.Type == channel.TypeXaiSubscription {
 		input.BaseURL = &officialBaseURL
 		input.Endpoints = []objects.ChannelEndpoint{}
+	} else if input.Type != nil && *input.Type == channel.TypeModelhub && (input.BaseURL == nil || strings.TrimSpace(*input.BaseURL) == "") {
+		modelHubBaseURL := modelhub.DefaultBaseURL
+		input.BaseURL = &modelHubBaseURL
 	} else if input.Type == nil && (input.BaseURL != nil || input.Endpoints != nil) {
 		existing, err := svc.entFromContext(ctx).Channel.Query().Where(channel.IDEQ(id), channel.TypeEQ(channel.TypeXaiSubscription)).Exist(ctx)
 		if err != nil {
@@ -851,6 +866,11 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 		if err := ValidateEndpoints(input.Endpoints); err != nil {
 			return nil, fmt.Errorf("invalid endpoints: %w", err)
 		}
+		if input.Type != nil {
+			if err := ValidateEndpointsForChannelType(*input.Type, input.Endpoints); err != nil {
+				return nil, fmt.Errorf("invalid endpoints: %w", err)
+			}
+		}
 	}
 
 	var updated *ent.Channel
@@ -867,6 +887,22 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 				Only(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to load channel provider identity: %w", err)
+			}
+		}
+		if input.BaseURL != nil {
+			effectiveType := input.Type
+			if effectiveType == nil && existingIdentity != nil {
+				effectiveType = &existingIdentity.Type
+			}
+			if effectiveType != nil && *effectiveType == channel.TypeModelhub {
+				if err := modelhub.ValidateBaseURL(*input.BaseURL); err != nil {
+					return fmt.Errorf("invalid ModelHub base URL: %w", err)
+				}
+			}
+		}
+		if input.Endpoints != nil && input.Type == nil && existingIdentity != nil {
+			if err := ValidateEndpointsForChannelType(existingIdentity.Type, input.Endpoints); err != nil {
+				return fmt.Errorf("invalid endpoints: %w", err)
 			}
 		}
 
@@ -1022,6 +1058,9 @@ func (svc *ChannelService) SaveChannelEndpoints(ctx context.Context, input SaveC
 	ch, err := svc.entFromContext(ctx).Channel.Get(ctx, input.ChannelID.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get channel: %w", err)
+	}
+	if err := ValidateEndpointsForChannelType(ch.Type, input.Endpoints); err != nil {
+		return nil, fmt.Errorf("invalid endpoints: %w", err)
 	}
 	if ch.Type == channel.TypeXaiSubscription {
 		return nil, errors.New("xAI subscription channels do not support custom endpoints")
