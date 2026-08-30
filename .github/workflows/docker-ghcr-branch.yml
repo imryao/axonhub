@@ -20,17 +20,13 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/axonhub
 
 jobs:
-  build-and-push:
-    name: Build and push multi-architecture image
-    runs-on: ubuntu-latest
+  prepare:
+    name: Resolve image tag
+    runs-on: ubuntu-slim
+    outputs:
+      tag: ${{ steps.image.outputs.tag }}
 
     steps:
-      - name: Check out source
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
       - name: Resolve immutable image tag
         id: image
         env:
@@ -49,10 +45,33 @@ jobs:
               ;;
           esac
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
-          printf '%s\n' "$tag" > internal/build/VERSION
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+  build-single-arch:
+    name: Build and push (${{ matrix.arch }}) [native]
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Write image version
+        env:
+          IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: printf '%s\n' "$IMAGE_TAG" > internal/build/VERSION
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -69,29 +88,55 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.image.outputs.tag }}
+          tags: type=raw,value=${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}
 
-      - name: Build and push image
-        id: build
+      - name: Build and push native image
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=axonhub-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=axonhub-${{ matrix.arch }}
           provenance: false
           sbom: false
 
+  create-manifest:
+    name: Create multi-architecture manifest
+    needs: [prepare, build-single-arch]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        env:
+          IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          image="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          docker buildx imagetools create \
+            --tag "$image" \
+            "${image}-amd64" \
+            "${image}-arm64"
+          docker buildx imagetools inspect "$image"
+
       - name: Publish image reference
+        env:
+          IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           {
             echo "### GHCR image"
             echo
-            echo '\`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}\`'
-            echo
-            echo "Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "\`${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}\`"
           } >> "$GITHUB_STEP_SUMMARY"
