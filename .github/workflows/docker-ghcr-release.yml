@@ -1,0 +1,142 @@
+name: Publish release image to GHCR
+
+on:
+  push:
+    branches:
+      - 'release/v1.0.0-beta7-fixes'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional immutable image tag (defaults to release-v1.0.0-beta7-fixes-<commit>)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/axonhub
+
+jobs:
+  prepare:
+    name: Resolve image tag
+    runs-on: ubuntu-slim
+    outputs:
+      tag: ${{ steps.image.outputs.tag }}
+
+    steps:
+      - name: Resolve immutable image tag
+        id: image
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="release-v1.0.0-beta7-fixes-${GITHUB_SHA}"
+          fi
+          case "$tag" in
+            *[!A-Za-z0-9._-]*|'')
+              echo "Invalid image tag: $tag" >&2
+              exit 1
+              ;;
+          esac
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+
+  build-single-arch:
+    name: Build and push (${{ matrix.arch }}) [native]
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Write image version
+        env:
+          IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: printf '%s\n' "$IMAGE_TAG" > internal/build/VERSION
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: type=raw,value=${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}
+
+      - name: Build and push native image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=axonhub-release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=axonhub-release-${{ matrix.arch }}
+          provenance: false
+          sbom: false
+
+  create-manifest:
+    name: Create multi-architecture manifest
+    needs: [prepare, build-single-arch]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        env:
+          IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -eu
+          image="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          docker buildx imagetools create \
+            --tag "$image" \
+            "${image}-amd64" \
+            "${image}-arm64"
+          docker buildx imagetools inspect "$image"
+
+      - name: Publish image reference
+        env:
+          IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          {
+            echo "### GHCR image"
+            echo
+            echo "\`${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
