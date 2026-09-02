@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -158,6 +159,250 @@ func TestOutboundTransformer_TransformStream_IncompleteResponseDoesNotEmitDone(t
 			require.NotContains(t, responses, llm.DoneResponse)
 		})
 	}
+}
+
+func TestOutboundTransformer_TransformStream_ProviderDoneRequiresSemanticTerminal(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	events := []*httpclient.StreamEvent{
+		{Type: "response.created", Data: []byte(`{"type":"response.created","response":{"id":"resp_done","object":"response","created_at":1700000000,"model":"gpt-5","status":"in_progress","output":[]}}`)},
+		{Data: []byte("[DONE]")},
+	}
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream(events))
+	require.NoError(t, err)
+
+	responses, err := streams.All(stream)
+	require.ErrorIs(t, err, ErrStreamIncomplete)
+	require.Equal(t, 0, countDoneResponses(responses))
+}
+
+func TestOutboundTransformer_TransformStream_NestedErrorKeepsProviderDetails(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	raw := []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_encrypted_content","message":"encrypted content could not be verified","param":"input"},"request_id":"req_nested"}`)
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream([]*httpclient.StreamEvent{{
+		Type: "error",
+		Data: raw,
+	}}))
+	require.NoError(t, err)
+
+	_, streamErr := streams.All(stream)
+	require.Error(t, streamErr)
+	require.Contains(t, streamErr.Error(), "encrypted content could not be verified")
+	require.Contains(t, streamErr.Error(), "invalid_encrypted_content")
+	require.Contains(t, streamErr.Error(), "invalid_request_error")
+
+	var responseErr *llm.ResponseError
+	require.ErrorAs(t, streamErr, &responseErr)
+	require.Equal(t, http.StatusBadRequest, responseErr.StatusCode)
+	require.Equal(t, "req_nested", responseErr.Detail.RequestID)
+	require.Equal(t, string(raw), string(responseErr.RawBody))
+	require.Equal(t, "error", responseErr.RawEventType)
+}
+
+func TestOutboundTransformer_TransformStream_ErrorFromSSEEnvelopeWithoutType(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	raw := []byte(`{"error":{"type":"server_error","message":"upstream exploded"}}`)
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream([]*httpclient.StreamEvent{{
+		Type: "error",
+		Data: raw,
+	}}))
+	require.NoError(t, err)
+
+	_, streamErr := streams.All(stream)
+	require.Error(t, streamErr)
+	require.Contains(t, streamErr.Error(), "upstream exploded")
+}
+
+func TestOutboundTransformer_TransformStream_UnwrapsNestedJSONErrorMessage(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	raw := []byte(`{"type":"error","error":{"code":-4201,"message":"{\"error\":{\"message\":\"encrypted content could not be decrypted\",\"type\":\"invalid_request_error\",\"code\":\"invalid_encrypted_content\"}}"}}`)
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream([]*httpclient.StreamEvent{{
+		Type: "error",
+		Data: raw,
+	}}))
+	require.NoError(t, err)
+
+	_, streamErr := streams.All(stream)
+	require.Error(t, streamErr)
+	require.Contains(t, streamErr.Error(), "encrypted content could not be decrypted")
+	require.Contains(t, streamErr.Error(), "invalid_encrypted_content")
+	require.Contains(t, streamErr.Error(), "invalid_request_error")
+}
+
+func TestOutboundTransformer_TransformStream_ModelHubErrorEnvelope(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	raw := []byte(`{"type":"error","error":{"code":-4201,"message":"{\n \\\"error\\\": {\n  \\\"message\\\": \\\"The encrypted content for item rs_demo could not be verified. Reason: Encrypted content could not be decrypted or parsed.\\\",\n  \\\"type\\\": \\\"invalid_request_error\\\",\n  \\\"code\\\": \\\"invalid_encrypted_content\\\"\n }\n}"}}`)
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream([]*httpclient.StreamEvent{{
+		Type: "error",
+		Data: raw,
+	}}))
+	require.NoError(t, err)
+
+	_, streamErr := streams.All(stream)
+	require.Error(t, streamErr)
+	require.Contains(t, streamErr.Error(), "The encrypted content for item rs_demo could not be verified")
+	require.Contains(t, streamErr.Error(), "invalid_encrypted_content")
+}
+
+func TestOutboundTransformer_TransformStream_EmptyErrorEventIsNotSilent(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream([]*httpclient.StreamEvent{{
+		Type: "error",
+	}}))
+	require.NoError(t, err)
+
+	_, streamErr := streams.All(stream)
+	require.Error(t, streamErr)
+	require.Contains(t, streamErr.Error(), "stream error")
+}
+
+func TestOutboundTransformer_TransformStream_ProviderDoneBeforeSemanticTerminalPreservesLateSourceError(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	sourceErr := errors.New("late source failure after bare provider done")
+	events := []*httpclient.StreamEvent{
+		{Type: "response.created", Data: []byte(`{"type":"response.created","response":{"id":"resp_done","object":"response","created_at":1700000000,"model":"gpt-5","status":"in_progress","output":[]}}`)},
+		{Data: []byte("[DONE]")},
+	}
+	source := &responsesErrorAfterStream{items: events, err: sourceErr}
+	stream, err := trans.TransformStream(t.Context(), nil, source)
+	require.NoError(t, err)
+
+	responses, err := streams.All(stream)
+	require.ErrorIs(t, err, sourceErr)
+	require.Equal(t, 0, countDoneResponses(responses))
+}
+
+func TestOutboundTransformer_TransformStream_ProviderDoneAfterSemanticTerminal(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	events := []*httpclient.StreamEvent{
+		{Type: "response.completed", Data: []byte(`{"type":"response.completed","response":{"id":"resp_done","object":"response","created_at":1700000000,"model":"gpt-5","status":"completed","output":[]}}`)},
+		{Data: []byte("[DONE]")},
+	}
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream(events))
+	require.NoError(t, err)
+
+	responses, err := streams.All(stream)
+	require.NoError(t, err)
+	require.Equal(t, 1, countDoneResponses(responses))
+}
+
+func TestOutboundTransformer_TransformStream_DuplicateProviderDoneEmitsOnce(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	events := []*httpclient.StreamEvent{
+		{Type: "response.completed", Data: []byte(`{"type":"response.completed","response":{"id":"resp_done","object":"response","created_at":1700000000,"model":"gpt-5","status":"completed","output":[]}}`)},
+		{Data: []byte("[DONE]")},
+		{Data: []byte("[DONE]")},
+	}
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream(events))
+	require.NoError(t, err)
+
+	responses, err := streams.All(stream)
+	require.NoError(t, err)
+	require.Equal(t, 1, countDoneResponses(responses))
+}
+
+func TestOutboundTransformer_TransformStream_ProviderDoneBeforeSourceErrorDoesNotEmitDone(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	sourceErr := errors.New("late source failure")
+	events := []*httpclient.StreamEvent{
+		{Type: "response.completed", Data: []byte(`{"type":"response.completed","response":{"id":"resp_done","object":"response","created_at":1700000000,"model":"gpt-5","status":"completed","output":[]}}`)},
+		{Data: []byte("[DONE]")},
+		{Data: []byte("[DONE]")},
+	}
+	source := &responsesErrorAfterStream{items: events, err: sourceErr}
+	stream, err := trans.TransformStream(t.Context(), nil, source)
+	require.NoError(t, err)
+
+	responses, err := streams.All(stream)
+	require.ErrorIs(t, err, sourceErr)
+	require.Equal(t, 0, countDoneResponses(responses))
+}
+
+type responsesErrorAfterStream struct {
+	items   []*httpclient.StreamEvent
+	index   int
+	current *httpclient.StreamEvent
+	err     error
+}
+
+func (s *responsesErrorAfterStream) Next() bool {
+	if s.index >= len(s.items) {
+		return false
+	}
+	s.current = s.items[s.index]
+	s.index++
+	return true
+}
+
+func (s *responsesErrorAfterStream) Current() *httpclient.StreamEvent { return s.current }
+func (s *responsesErrorAfterStream) Err() error                       { return s.err }
+func (s *responsesErrorAfterStream) Close() error                     { return nil }
+
+func TestOutboundTransformer_TransformStream_DuplicateSemanticTerminalEmitsOnce(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	events := []*httpclient.StreamEvent{
+		{Type: "response.completed", Data: []byte(`{"type":"response.completed","response":{"id":"resp_done","object":"response","created_at":1700000000,"model":"gpt-5","status":"completed","output":[]}}`)},
+		{Type: "response.completed", Data: []byte(`{"type":"response.completed","response":{"id":"resp_done","object":"response","created_at":1700000000,"model":"gpt-5","status":"completed","output":[]}}`)},
+	}
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream(events))
+	require.NoError(t, err)
+
+	responses, err := streams.All(stream)
+	require.NoError(t, err)
+	require.Equal(t, 1, countDoneResponses(responses))
+	finishResponses := 0
+	for _, response := range responses {
+		if response != nil && len(response.Choices) > 0 && response.Choices[0].FinishReason != nil {
+			finishResponses++
+		}
+	}
+	require.Equal(t, 1, finishResponses)
+}
+
+func TestOutboundTransformer_TransformStream_SemanticTerminalSynthesizesOneDone(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	events := []*httpclient.StreamEvent{
+		{Type: "response.completed", Data: []byte(`{"type":"response.completed","response":{"id":"resp_complete","object":"response","created_at":1700000000,"model":"gpt-5","status":"completed","output":[]}}`)},
+	}
+	stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream(events))
+	require.NoError(t, err)
+
+	responses, err := streams.All(stream)
+	require.NoError(t, err)
+	require.Equal(t, 1, countDoneResponses(responses))
+}
+
+func countDoneResponses(responses []*llm.Response) int {
+	count := 0
+	for _, response := range responses {
+		if response == llm.DoneResponse {
+			count++
+		}
+	}
+	return count
 }
 
 func TestOutboundTransformer_StreamTransformation_ErrorEvent(t *testing.T) {

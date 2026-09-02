@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/samber/lo"
+	"github.com/tidwall/gjson"
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
@@ -132,7 +133,14 @@ func (s *responsesOutboundStream) Next() bool {
 //
 //nolint:maintidx,gocognit // It is complex and hard to split.
 func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamEvent) error {
-	if event == nil || len(event.Data) == 0 {
+	if event == nil {
+		return nil
+	}
+	if len(event.Data) == 0 {
+		if event.Type == string(StreamEventTypeError) {
+			return newResponsesStreamError(event, StreamEvent{Type: StreamEventTypeError})
+		}
+
 		return nil
 	}
 
@@ -154,6 +162,14 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 	err := json.Unmarshal(event.Data, &streamEvent)
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal responses api stream event: %w", err)
+	}
+	// Some SSE gateways put the event name in the SSE envelope (or an
+	// `event` JSON field) and omit `type` from the data payload. Normalize that
+	// shape before dispatching so an error event is not mistaken for a clean EOF.
+	if streamEvent.Type == "" {
+		if event.Type == string(StreamEventTypeError) || gjson.GetBytes(event.Data, "event").String() == string(StreamEventTypeError) {
+			streamEvent.Type = StreamEventTypeError
+		}
 	}
 
 	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
@@ -693,13 +709,7 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 		}
 
 	case StreamEventTypeError:
-		return &llm.ResponseError{
-			Detail: llm.ErrorDetail{
-				Code:    streamEvent.Code,
-				Message: streamEvent.Message,
-				Param:   lo.FromPtr(streamEvent.Param),
-			},
-		}
+		return newResponsesStreamError(event, streamEvent)
 
 	case StreamEventTypeImageGenerationPartialImage,
 		StreamEventTypeImageGenerationGenerating,
@@ -742,6 +752,144 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 	s.enqueue(resp)
 
 	return nil
+}
+
+// newResponsesStreamError preserves the complete provider error event. Most
+// Responses implementations put the useful fields under an `error` object,
+// while some relays put them at the top level or under `data.error`. The
+// StreamEvent struct intentionally models the top-level wire fields, so parse
+// all known envelopes here instead of silently returning an empty error.
+func newResponsesStreamError(event *httpclient.StreamEvent, parsed StreamEvent) *llm.ResponseError {
+	detail := llm.ErrorDetail{
+		Code:    parsed.Code,
+		Message: parsed.Message,
+		Param:   lo.FromPtr(parsed.Param),
+	}
+
+	statusCode := 0
+	if event != nil && len(event.Data) > 0 {
+		root := gjson.ParseBytes(event.Data)
+		statusCode = int(root.Get("status").Int())
+		if statusCode == 0 {
+			statusCode = int(root.Get("error.status").Int())
+		}
+
+		// Prefer a nested provider error object, then tolerate a wrapped
+		// data.error object used by a few SSE gateways.
+		errObj := root.Get("error")
+		if !errObj.Exists() {
+			errObj = root.Get("data.error")
+		}
+		if errObj.Exists() {
+			if detail.Code == "" {
+				detail.Code = errObj.Get("code").String()
+				if detail.Code == "" {
+					detail.Code = errObj.Get("type").String()
+				}
+			}
+			if detail.Message == "" {
+				detail.Message = errObj.Get("message").String()
+				if detail.Message == "" {
+					detail.Message = errObj.String()
+				}
+			}
+			if detail.Type == "" {
+				detail.Type = errObj.Get("type").String()
+			}
+			if detail.Param == "" {
+				detail.Param = errObj.Get("param").String()
+			}
+			if detail.RequestID == "" {
+				detail.RequestID = errObj.Get("request_id").String()
+			}
+		}
+
+		if detail.Message == "" {
+			detail.Message = root.Get("message").String()
+			if detail.Message == "" {
+				detail.Message = root.Get("data.message").String()
+			}
+		}
+		if detail.Code == "" {
+			detail.Code = root.Get("code").String()
+			if detail.Code == "" {
+				detail.Code = root.Get("data.code").String()
+			}
+		}
+		if detail.Type == "" {
+			detail.Type = root.Get("error.type").String()
+		}
+		if detail.Param == "" {
+			detail.Param = root.Get("param").String()
+		}
+		if detail.RequestID == "" {
+			detail.RequestID = root.Get("request_id").String()
+			if detail.RequestID == "" {
+				detail.RequestID = root.Get("data.request_id").String()
+			}
+		}
+
+		expandNestedResponseErrorDetail(&detail)
+	}
+
+	if detail.Message == "" {
+		detail.Message = "stream error"
+	}
+	if detail.Type == "" {
+		detail.Type = "stream_error"
+	}
+
+	responseErr := &llm.ResponseError{
+		StatusCode: statusCode,
+		Detail:     detail,
+	}
+	if event != nil {
+		responseErr.RawEventType = event.Type
+		if responseErr.RawEventType == "" {
+			responseErr.RawEventType = string(parsed.Type)
+		}
+		responseErr.RawBody = append([]byte(nil), event.Data...)
+	}
+
+	return responseErr
+}
+
+// expandNestedResponseErrorDetail unwraps gateway responses that encode the
+// provider error as a JSON string in the outer message, for example
+// `{"code":-4201,"message":"{\"error\":{...}}"}`. Keep the original
+// event in RawBody, but expose the inner message/code/type in normal error
+// formatting so operators do not have to manually decode escaped JSON.
+func expandNestedResponseErrorDetail(detail *llm.ErrorDetail) {
+	if detail == nil {
+		return
+	}
+
+	rawMessage := strings.TrimSpace(detail.Message)
+	if rawMessage == "" || !gjson.Valid(rawMessage) {
+		return
+	}
+
+	root := gjson.Parse(rawMessage)
+	errObj := root.Get("error")
+	if !errObj.Exists() {
+		return
+	}
+
+	if message := errObj.Get("message").String(); message != "" {
+		detail.Message = message
+	}
+	if code := errObj.Get("code").String(); code != "" {
+		detail.Code = code
+	}
+	if typ := errObj.Get("type").String(); typ != "" {
+		detail.Type = typ
+	}
+	if param := errObj.Get("param").String(); param != "" {
+		detail.Param = param
+	}
+	if requestID := errObj.Get("request_id").String(); requestID != "" {
+		detail.RequestID = requestID
+	}
 }
 
 func equalJSONValues(left, right string) bool {

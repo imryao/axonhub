@@ -121,6 +121,11 @@ func TestResponseError_Error(t *testing.T) {
 	}
 }
 
+func TestResponseError_ErrorNeverReturnsEmptyMessage(t *testing.T) {
+	require.Equal(t, "upstream response error", (ResponseError{}).Error())
+	require.Equal(t, "Request failed: Bad Request", (ResponseError{StatusCode: 400}).Error())
+}
+
 func TestMessage_JSONOmitZero(t *testing.T) {
 	tests := []struct {
 		name     string

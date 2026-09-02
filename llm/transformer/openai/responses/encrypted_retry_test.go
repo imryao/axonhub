@@ -48,6 +48,13 @@ func TestIsInvalidEncryptedContentError(t *testing.T) {
 	}, nil))
 }
 
+func TestRedactRetryDiagnosticBody(t *testing.T) {
+	got := redactRetryDiagnosticBody([]byte(`{"error":{"message":"keep","encrypted_content":"secret"},"api_key":"secret-key"}`))
+	require.Contains(t, got, "keep")
+	require.NotContains(t, got, "secret-key")
+	require.NotContains(t, got, "secret\"}")
+}
+
 func TestDetectEncryptedContentFailureCrossResource(t *testing.T) {
 	require.Equal(t, encryptedContentFailureCrossResource, detectEncryptedContentFailure(&httpclient.Error{
 		StatusCode: http.StatusBadRequest,

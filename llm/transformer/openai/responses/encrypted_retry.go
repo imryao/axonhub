@@ -3,8 +3,10 @@ package responses
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -21,6 +23,8 @@ import (
 )
 
 const invalidEncryptedContentCode = "invalid_encrypted_content"
+
+const retryDiagnosticBodyLimit = 8 * 1024
 
 const crossResourceItemErrorFragment = "created under a different azure openai resource"
 
@@ -64,7 +68,13 @@ func (e *encryptedContentRetryExecutor) Do(ctx context.Context, request *httpcli
 
 	response, err := e.inner.Do(ctx, request)
 	if retryRequest, ok := PrepareEncryptedContentRetryRequest(request, response, err); ok {
-		return e.inner.Do(ctx, retryRequest)
+		failure := detectEncryptedContentFailure(err, response)
+		logEncryptedContentRetry(ctx, request, retryRequest, response, err, failure)
+
+		retryResponse, retryErr := e.inner.Do(ctx, retryRequest)
+		logEncryptedContentRetryResult(ctx, retryResponse, retryErr)
+
+		return retryResponse, retryErr
 	}
 
 	return response, err
@@ -77,14 +87,179 @@ func (e *encryptedContentRetryExecutor) DoStream(ctx context.Context, request *h
 
 	stream, err := e.inner.DoStream(ctx, request)
 	if retryRequest, ok := PrepareEncryptedContentRetryRequest(request, nil, err); ok {
+		failure := detectEncryptedContentFailure(err, nil)
+		logEncryptedContentRetry(ctx, request, retryRequest, nil, err, failure)
+
 		if stream != nil {
 			_ = stream.Close()
 		}
 
-		return e.inner.DoStream(ctx, retryRequest)
+		retryStream, retryErr := e.inner.DoStream(ctx, retryRequest)
+		logEncryptedContentRetryStreamResult(ctx, retryStream, retryErr)
+
+		return retryStream, retryErr
 	}
 
 	return stream, err
+}
+
+func logEncryptedContentRetry(
+	ctx context.Context,
+	request *httpclient.Request,
+	retryRequest *httpclient.Request,
+	response *httpclient.Response,
+	err error,
+	failure encryptedContentFailure,
+) {
+	fields := []slog.Attr{
+		slog.String("retry_reason", encryptedContentFailureName(failure)),
+		slog.Int("original_body_bytes", requestBodySize(request)),
+		slog.Int("retry_body_bytes", requestBodySize(retryRequest)),
+	}
+	if body := retryDiagnosticBody(response, err); body != "" {
+		fields = append(fields, slog.String("upstream_error_body", body))
+	}
+	if status := responseStatusCode(response, err); status != 0 {
+		fields = append(fields, slog.Int("upstream_status_code", status))
+	}
+
+	slog.LogAttrs(ctx, slog.LevelWarn, "retrying Responses request after encrypted-content error", fields...)
+}
+
+func logEncryptedContentRetryResult(ctx context.Context, response *httpclient.Response, err error) {
+	if err != nil {
+		fields := []slog.Attr{slog.String("retry_error", retryErrorText(response, err))}
+		if status := responseStatusCode(response, err); status != 0 {
+			fields = append(fields, slog.Int("retry_status_code", status))
+		}
+		slog.LogAttrs(ctx, slog.LevelError, "Responses encrypted-content retry failed", fields...)
+
+		return
+	}
+
+	slog.InfoContext(ctx, "Responses encrypted-content retry succeeded")
+}
+
+func retryErrorText(response *httpclient.Response, err error) string {
+	if err == nil {
+		return ""
+	}
+
+	if body := retryDiagnosticBody(response, err); body != "" {
+		return body
+	}
+
+	var httpErr *httpclient.Error
+	if errors.As(err, &httpErr) && httpErr != nil {
+		if httpErr.Status != "" {
+			return "upstream HTTP error: " + httpErr.Status
+		}
+		if httpErr.StatusCode != 0 {
+			return fmt.Sprintf("upstream HTTP error: status %d", httpErr.StatusCode)
+		}
+	}
+
+	return boundedRetryDiagnosticText(err.Error())
+}
+
+func logEncryptedContentRetryStreamResult(
+	ctx context.Context,
+	stream streams.Stream[*httpclient.StreamEvent],
+	err error,
+) {
+	if err != nil {
+		logEncryptedContentRetryResult(ctx, nil, err)
+
+		return
+	}
+
+	if stream == nil {
+		slog.LogAttrs(ctx, slog.LevelError,
+			"Responses encrypted-content retry returned no stream",
+		)
+
+		return
+	}
+
+	slog.InfoContext(ctx, "Responses encrypted-content retry stream established")
+}
+
+func requestBodySize(request *httpclient.Request) int {
+	if request == nil {
+		return 0
+	}
+
+	return len(request.Body)
+}
+
+func encryptedContentFailureName(failure encryptedContentFailure) string {
+	switch failure {
+	case encryptedContentFailureInvalid:
+		return invalidEncryptedContentCode
+	case encryptedContentFailureCrossResource:
+		return "cross_resource_item"
+	default:
+		return "unknown"
+	}
+}
+
+func retryDiagnosticBody(response *httpclient.Response, err error) string {
+	body := responseErrorBody(response, err)
+	if len(body) == 0 {
+		return ""
+	}
+
+	return boundedRetryDiagnosticText(redactRetryDiagnosticBody(bytes.TrimSpace(body)))
+}
+
+func boundedRetryDiagnosticText(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= retryDiagnosticBodyLimit {
+		return value
+	}
+
+	return value[:retryDiagnosticBodyLimit] + "..."
+}
+
+func redactRetryDiagnosticBody(body []byte) string {
+	var value any
+	if err := json.Unmarshal(body, &value); err != nil {
+		return string(body)
+	}
+
+	redactRetryDiagnosticValue(value)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return string(body)
+	}
+
+	return string(encoded)
+}
+
+func redactRetryDiagnosticValue(value any) {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, nested := range current {
+			if isRetryDiagnosticSensitiveKey(key) {
+				current[key] = "[REDACTED]"
+				continue
+			}
+			redactRetryDiagnosticValue(nested)
+		}
+	case []any:
+		for _, nested := range current {
+			redactRetryDiagnosticValue(nested)
+		}
+	}
+}
+
+func isRetryDiagnosticSensitiveKey(key string) bool {
+	switch strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_")) {
+	case "authorization", "api_key", "apikey", "access_token", "refresh_token", "cookie", "encrypted_content":
+		return true
+	default:
+		return false
+	}
 }
 
 // PrepareEncryptedContentRetryRequest returns a request copy with opaque,

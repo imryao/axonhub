@@ -2,7 +2,10 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -18,9 +21,10 @@ import (
 
 // Precompiled regex patterns for sanitizeResponseBody to avoid recompiling on each call.
 var (
-	tokenRegex  = regexp.MustCompile(`(?i)(bearer[\s:=]+)[a-zA-Z0-9_\-\.]+`)
-	apiKeyRegex = regexp.MustCompile(`(api[keyK]ey|API[keyK]ey)["']?\s*[:=]\s*["']?([a-zA-Z0-9_\-\.]{8,})["']?`)
-	emailRegex  = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
+	tokenRegex       = regexp.MustCompile(`(?i)(bearer[\s:=]+)[a-zA-Z0-9_\-\.]+`)
+	apiKeyRegex      = regexp.MustCompile(`(api[keyK]ey|API[keyK]ey)["']?\s*[:=]\s*["']?([a-zA-Z0-9_\-\.]{8,})["']?`)
+	secretFieldRegex = regexp.MustCompile(`(?i)("(?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|cookie|encrypted_content)"\s*:\s*")[^"]*(")`)
+	emailRegex       = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
 )
 
 // sanitizeResponseBody redacts obvious secrets and truncates the body for safe logging.
@@ -36,6 +40,10 @@ func sanitizeResponseBody(body []byte, maxLen int) []byte {
 
 	// Redact API keys (common patterns)
 	str = apiKeyRegex.ReplaceAllString(str, "$1=[REDACTED]")
+
+	// Redact common JSON credential fields, including account-bound encrypted
+	// reasoning blobs that should never be copied into application logs.
+	str = secretFieldRegex.ReplaceAllString(str, "${1}[REDACTED]${2}")
 
 	// Redact email addresses
 	str = emailRegex.ReplaceAllString(str, "[EMAIL REDACTED]")
@@ -204,11 +212,7 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawError(ctx context.Conte
 		if modelID := m.outbound.GetCurrentModelID(); modelID != "" {
 			logFields = append(logFields, log.String("model_id", modelID))
 		}
-		// Add response body for HTTP errors to help debug 400 errors (sanitized for PII)
-		if httpErr, ok := xerrors.As[*httpclient.Error](err); ok && len(httpErr.Body) > 0 {
-			sanitizedBody := sanitizeResponseBody(httpErr.Body, 1024)
-			logFields = append(logFields, log.ByteString("response_body", sanitizedBody))
-		}
+		logFields = appendUpstreamErrorDiagnostics(logFields, err)
 
 		log.Warn(ctx, "request process failed", logFields...)
 	}
@@ -230,26 +234,71 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawError(ctx context.Conte
 
 // ExtractErrorInfo extracts HTTP status code and sanitized response body from error.
 func ExtractErrorInfo(err error) *biz.ExecutionErrorInfo {
-	httpErr, ok := xerrors.As[*httpclient.Error](err)
-	if !ok {
-		return nil
+	httpErr, ok := xerrors.As[*httpclient.Error](diagnosticError(err))
+	if ok && httpErr != nil {
+		return &biz.ExecutionErrorInfo{
+			StatusCode: &httpErr.StatusCode,
+		}
 	}
 
-	return &biz.ExecutionErrorInfo{
-		StatusCode: &httpErr.StatusCode,
+	var responseErr *llm.ResponseError
+	if errors.As(err, &responseErr) && responseErr != nil && responseErr.StatusCode != 0 {
+		return &biz.ExecutionErrorInfo{
+			StatusCode: &responseErr.StatusCode,
+		}
 	}
+
+	return nil
 }
 
 // ExtractErrorMessage extracts HTTP error message from error.
 func ExtractErrorMessage(err error) string {
-	httpErr, ok := xerrors.As[*httpclient.Error](err)
-	if !ok {
-		return err.Error()
+	if err == nil {
+		return ""
+	}
+
+	// HTTP errors are transformed before the pipeline returns to the
+	// orchestrator. Prefer the retained provider error so its response body is
+	// still available for persistence and diagnostics.
+	diagnosticErr := diagnosticError(err)
+	if httpErr, ok := xerrors.As[*httpclient.Error](diagnosticErr); ok {
+		return extractHTTPErrorMessage(httpErr)
+	}
+
+	var responseErr *llm.ResponseError
+	if errors.As(err, &responseErr) && responseErr != nil {
+		message := strings.TrimSpace(responseErr.Error())
+		if len(responseErr.RawBody) > 0 {
+			raw := strings.TrimSpace(string(sanitizeResponseBody(responseErr.RawBody, errorMatchBodyLimit)))
+			if raw != "" && !strings.Contains(message, raw) {
+				if message == "" || message == "upstream response error" {
+					return raw
+				}
+
+				return message + "; upstream_event: " + raw
+			}
+		}
+		if message != "" {
+			return message
+		}
+	}
+
+	message := strings.TrimSpace(err.Error())
+	if message != "" {
+		return message
+	}
+
+	return "upstream error (no diagnostic message)"
+}
+
+func extractHTTPErrorMessage(httpErr *httpclient.Error) string {
+	if httpErr == nil {
+		return "upstream HTTP error"
 	}
 
 	// Anthropic && OpenAI error format.
 	message := gjson.GetBytes(httpErr.Body, "error.message")
-	if message.Exists() && message.Type == gjson.String {
+	if message.Exists() && message.Type == gjson.String && strings.TrimSpace(message.String()) != "" {
 		return message.String()
 	}
 
@@ -258,13 +307,105 @@ func ExtractErrorMessage(err error) string {
 	message1 := gjson.GetBytes(httpErr.Body, "errors.0.message")
 	message2 := gjson.GetBytes(httpErr.Body, "errors.message")
 
-	if message1.Exists() && message1.Type == gjson.String && message1.String() != "" {
+	if message1.Exists() && message1.Type == gjson.String && strings.TrimSpace(message1.String()) != "" {
 		return message1.String()
 	}
 
-	if message2.Exists() && message2.Type == gjson.String {
+	if message2.Exists() && message2.Type == gjson.String && strings.TrimSpace(message2.String()) != "" {
 		return message2.String()
 	}
 
-	return httpErr.Error()
+	// Keep the raw provider body when no standard message field exists. This is
+	// what makes gateway-specific errors (for example code -4201 wrappers)
+	// diagnosable instead of reducing them to a generic status line.
+	if body := strings.TrimSpace(string(sanitizeResponseBody(httpErr.Body, errorMatchBodyLimit))); body != "" {
+		return body
+	}
+
+	if status := strings.TrimSpace(httpErr.Status); status != "" {
+		return fmt.Sprintf("upstream HTTP error: %s", status)
+	}
+
+	if httpErr.StatusCode != 0 {
+		return fmt.Sprintf("upstream HTTP error: status %d", httpErr.StatusCode)
+	}
+
+	return "upstream HTTP error"
+}
+
+// diagnosticError returns the provider-facing error retained by the pipeline,
+// if any. The public error remains transformed so upstream-error redaction and
+// retry classification keep their existing behavior.
+func diagnosticError(err error) error {
+	if rawErr := pipeline.RawError(err); rawErr != nil {
+		return rawErr
+	}
+
+	return err
+}
+
+// appendUpstreamErrorDiagnostics adds bounded, sanitized provider details to
+// the request failure log. Keep this separate from Error() so public API
+// responses can still hide provider details according to policy.
+func appendUpstreamErrorDiagnostics(fields []log.Field, err error) []log.Field {
+	if err == nil {
+		return fields
+	}
+
+	providerErr := diagnosticError(err)
+	fields = append(fields,
+		log.String("error_type", fmt.Sprintf("%T", providerErr)),
+	)
+
+	if httpErr, ok := xerrors.As[*httpclient.Error](providerErr); ok && httpErr != nil {
+		fields = append(fields,
+			log.Int("upstream_status_code", httpErr.StatusCode),
+			log.String("upstream_status", httpErr.Status),
+			log.String("upstream_url", sanitizeUpstreamURL(httpErr.URL)),
+		)
+		if body := sanitizeResponseBody(httpErr.Body, errorMatchBodyLimit); len(body) > 0 {
+			// Keep the historical field name for existing log queries and add an
+			// explicit upstream-prefixed alias for new consumers.
+			fields = append(fields,
+				log.ByteString("response_body", body),
+				log.ByteString("upstream_response_body", body),
+			)
+		}
+	}
+
+	var responseErr *llm.ResponseError
+	if errors.As(err, &responseErr) && responseErr != nil {
+		fields = append(fields,
+			log.Int("upstream_error_status_code", responseErr.StatusCode),
+			log.String("upstream_error_code", responseErr.Detail.Code),
+			log.String("upstream_error_type", responseErr.Detail.Type),
+			log.ByteString("upstream_error_message", sanitizeResponseBody([]byte(responseErr.Detail.Message), errorMatchBodyLimit)),
+			log.String("upstream_error_request_id", responseErr.Detail.RequestID),
+		)
+		if responseErr.RawEventType != "" {
+			fields = append(fields, log.String("upstream_event_type", responseErr.RawEventType))
+		}
+		if body := sanitizeResponseBody(responseErr.RawBody, errorMatchBodyLimit); len(body) > 0 {
+			fields = append(fields, log.ByteString("upstream_event_body", body))
+		}
+	}
+
+	return fields
+}
+
+func sanitizeUpstreamURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+
+	// Request URLs may contain provider API keys in query parameters. Keep the
+	// host/path useful for diagnosis while dropping the query and fragment.
+	if idx := strings.IndexByte(rawURL, '?'); idx >= 0 {
+		rawURL = rawURL[:idx]
+	}
+	if idx := strings.IndexByte(rawURL, '#'); idx >= 0 {
+		rawURL = rawURL[:idx]
+	}
+
+	return rawURL
 }

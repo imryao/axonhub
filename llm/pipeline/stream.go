@@ -316,7 +316,7 @@ func (p *pipeline) stream(
 		}
 
 		if httpErr, ok := errors.AsType[*httpclient.Error](err); ok {
-			return nil, WrapUpstreamError(p.Outbound.TransformError(ctx, httpErr))
+			return nil, WrapUpstreamErrorWithRaw(p.Outbound.TransformError(ctx, httpErr), httpErr)
 		}
 
 		return nil, WrapUpstreamError(err)

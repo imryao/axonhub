@@ -394,6 +394,7 @@ func parseAnthropicStreamErrorEvent(event *httpclient.StreamEvent) *llm.Response
 				Message: "stream error",
 				Type:    "stream_error",
 			},
+			RawEventType: event.Type,
 		}
 	}
 
@@ -438,7 +439,11 @@ func parseAnthropicStreamErrorEvent(event *httpclient.StreamEvent) *llm.Response
 		detail.Type = "stream_error"
 	}
 
-	return &llm.ResponseError{Detail: detail}
+	return &llm.ResponseError{
+		Detail:       detail,
+		RawBody:      append([]byte(nil), event.Data...),
+		RawEventType: event.Type,
+	}
 }
 
 func (s *outboundStream) Current() *llm.Response {

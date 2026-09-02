@@ -382,6 +382,7 @@ func parseStreamErrorEvent(event *httpclient.StreamEvent) *llm.ResponseError {
 				Message: "stream error",
 				Type:    "stream_error",
 			},
+			RawEventType: event.Type,
 		}
 	}
 
@@ -423,7 +424,11 @@ func parseStreamErrorEvent(event *httpclient.StreamEvent) *llm.ResponseError {
 			detail.RequestID = rid
 		}
 
-		return &llm.ResponseError{Detail: detail}
+		return &llm.ResponseError{
+			Detail:       detail,
+			RawBody:      append([]byte(nil), event.Data...),
+			RawEventType: event.Type,
+		}
 	}
 
 	// OpenAI-style: {"error":{...}} or {"error":"..."}
@@ -449,7 +454,11 @@ func parseStreamErrorEvent(event *httpclient.StreamEvent) *llm.ResponseError {
 		detail.RequestID = rid
 	}
 
-	return &llm.ResponseError{Detail: detail}
+	return &llm.ResponseError{
+		Detail:       detail,
+		RawBody:      append([]byte(nil), event.Data...),
+		RawEventType: event.Type,
+	}
 }
 
 // buildFullRequestURL constructs the appropriate URL based on the platform.

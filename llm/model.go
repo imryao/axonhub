@@ -862,6 +862,13 @@ type PromptTokensDetails struct {
 type ResponseError struct {
 	StatusCode int         `json:"-"`
 	Detail     ErrorDetail `json:"error"`
+
+	// RawBody and RawEventType carry the provider's original error payload for
+	// server-side diagnostics. They are intentionally excluded from JSON so raw
+	// provider details are not leaked when an upstream-error policy hides them
+	// from API clients.
+	RawBody      []byte `json:"-"`
+	RawEventType string `json:"-"`
 }
 
 func (e ResponseError) Error() string {
@@ -888,6 +895,19 @@ func (e ResponseError) Error() string {
 	if e.Detail.RequestID != "" {
 		sb.WriteString(", request_id: ")
 		sb.WriteString(e.Detail.RequestID)
+	}
+
+	// A provider may send an in-stream error event whose useful fields are
+	// nested differently (or omitted entirely). Never return an empty error
+	// string: an empty string gets persisted as "failed to stream request: " and
+	// makes the incident impossible to diagnose. The original payload is kept in
+	// RawBody and is emitted separately by the server's diagnostic logger.
+	if e.Detail.Message == "" && e.Detail.Code == "" && e.Detail.Type == "" && e.Detail.RequestID == "" {
+		if e.StatusCode != 0 {
+			return fmt.Sprintf("Request failed: %s", http.StatusText(e.StatusCode))
+		}
+
+		return "upstream response error"
 	}
 
 	return sb.String()
