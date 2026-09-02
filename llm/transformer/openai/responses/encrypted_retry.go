@@ -336,7 +336,9 @@ func isResponsesRequest(request *httpclient.Request) bool {
 	}
 
 	switch request.RequestType {
-	case llm.RequestTypeImage.String(), llm.RequestTypeAlphaSearch.String():
+	// Keep the alpha_search literal for compatibility with release tags that
+	// predate the RequestTypeAlphaSearch constant.
+	case llm.RequestTypeImage.String(), "alpha_search":
 		return false
 	}
 
