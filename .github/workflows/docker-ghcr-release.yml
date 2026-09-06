@@ -3,11 +3,11 @@ name: Publish release image to GHCR
 on:
   push:
     branches:
-      - 'release/v1.0.0-beta7-fixes'
+      - 'release/v1.0.0-beta10-fixes'
   workflow_dispatch:
     inputs:
       tag:
-        description: "Optional immutable image tag (defaults to release-v1.0.0-beta7-fixes-<commit>)"
+        description: "Optional immutable image tag (defaults to release-v1.0.0-beta10-fixes-<commit>)"
         required: false
         type: string
 
@@ -36,7 +36,7 @@ jobs:
           if [ -n "$INPUT_TAG" ]; then
             tag="$INPUT_TAG"
           else
-            tag="release-v1.0.0-beta7-fixes-${GITHUB_SHA}"
+            tag="release-v1.0.0-beta10-fixes-${GITHUB_SHA}"
           fi
           case "$tag" in
             *[!A-Za-z0-9._-]*|'')
