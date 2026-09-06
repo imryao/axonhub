@@ -101,14 +101,15 @@ func (t *OutboundTransformer) CustomizeExecutor(executor pipeline.Executor) pipe
 		return executor
 	}
 	if t.config.Transport != TransportWebSocket {
-		return &httpTransportExecutor{inner: executor, finalize: t.FinalizeTransportRequest}
-	}
-
-	if t.config.Transport != TransportWebSocket {
 		// Responses reasoning blobs are signed by the serving account. If
 		// affinity drifts between turns, recover the request before the
 		// pipeline gives up or switches channels.
-		return NewEncryptedContentRetryExecutor(executor)
+		if _, ok := executor.(*encryptedContentRetryExecutor); ok {
+			return executor
+		}
+
+		transportExecutor := &httpTransportExecutor{inner: executor, finalize: t.FinalizeTransportRequest}
+		return NewEncryptedContentRetryExecutor(transportExecutor)
 	}
 
 	if !ExecutorComparable(executor) {

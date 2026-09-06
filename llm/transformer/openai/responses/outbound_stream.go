@@ -158,6 +158,14 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 
 	err := json.Unmarshal(event.Data, &streamEvent)
 	if err != nil {
+		// A few gateways encode error codes as JSON numbers even though the
+		// normal Responses schema uses strings. Preserve the raw error event so
+		// the tolerant parser below can extract its details.
+		if event.Type == string(StreamEventTypeError) ||
+			gjson.GetBytes(event.Data, "type").String() == string(StreamEventTypeError) {
+			return newResponsesStreamError(event, StreamEvent{Type: StreamEventTypeError})
+		}
+
 		return fmt.Errorf("failed to unmarshal responses api stream event: %w", err)
 	}
 	// Some SSE gateways put the event name in the SSE envelope (or an
@@ -827,6 +835,9 @@ func newResponsesStreamError(event *httpclient.StreamEvent, parsed StreamEvent) 
 		}
 		if detail.Type == "" {
 			detail.Type = root.Get("error.type").String()
+		}
+		if detail.Type == "" {
+			detail.Type = root.Get("type").String()
 		}
 		if detail.Param == "" {
 			detail.Param = root.Get("param").String()
