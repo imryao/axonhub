@@ -269,7 +269,13 @@ func ExtractErrorMessage(err error) string {
 
 	var responseErr *llm.ResponseError
 	if errors.As(err, &responseErr) && responseErr != nil {
-		message := strings.TrimSpace(responseErr.Error())
+		// Persist the structured provider message without the synthetic status,
+		// code, and type decorations added by ResponseError.Error(). Those fields
+		// remain available in the structured error info and diagnostic logs.
+		message := strings.TrimSpace(responseErr.Detail.Message)
+		if message == "" {
+			message = strings.TrimSpace(responseErr.Error())
+		}
 		if len(responseErr.RawBody) > 0 {
 			raw := strings.TrimSpace(string(sanitizeResponseBody(responseErr.RawBody, errorMatchBodyLimit)))
 			if raw != "" && !strings.Contains(message, raw) {
