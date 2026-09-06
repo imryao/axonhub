@@ -3,6 +3,7 @@ package responses
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -141,6 +142,25 @@ func TestOutboundTransformer_TransformStream_IncompleteResponseDoesNotEmitDone(t
 			name: "with empty response ID",
 			events: []*httpclient.StreamEvent{
 				{Type: "response.created", Data: []byte(`{"type":"response.created","response":{"id":"","object":"response","created_at":1700000000,"model":"gpt-5","status":"in_progress","output":[]}}`)},
+			},
+		},
+		{
+			name: "text delta without response ID",
+			events: []*httpclient.StreamEvent{
+				{Type: "response.output_text.delta", Data: []byte(`{"type":"response.output_text.delta","item_id":"msg_partial","output_index":0,"content_index":0,"delta":"partial"}`)},
+			},
+		},
+		{
+			name: "reasoning delta without response ID",
+			events: []*httpclient.StreamEvent{
+				{Type: "response.reasoning_summary_text.delta", Data: []byte(`{"type":"response.reasoning_summary_text.delta","item_id":"rs_partial","output_index":0,"summary_index":0,"delta":"partial"}`)},
+			},
+		},
+		{
+			name: "function call without response ID",
+			events: []*httpclient.StreamEvent{
+				{Type: "response.output_item.added", Data: []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_partial","type":"function_call","call_id":"call_partial","name":"write_file","arguments":""}}`)},
+				{Type: "response.function_call_arguments.delta", Data: []byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_partial","output_index":0,"delta":"{\"path\":\"/tmp/x\"}"}`)},
 			},
 		},
 	}
@@ -1214,11 +1234,11 @@ func TestOutboundTransformer_TransformStream_PreservesPreviousResponseID(t *test
 // Completions finish_reason must reflect that instead of defaulting to stop.
 func TestOutboundTransformer_TransformStream_MapsCompletedStatusToFinishReason(t *testing.T) {
 	tests := []struct {
-		name            string
-		status          string
+		name             string
+		status           string
 		incompleteReason string
-		expectedReason  string
-		withToolCalls   bool
+		expectedReason   string
+		withToolCalls    bool
 	}{
 		{name: "incomplete maps to length", status: "incomplete", expectedReason: "length"},
 		{name: "incomplete with content_filter reason maps to content_filter", status: "incomplete", incompleteReason: "content_filter", expectedReason: "content_filter"},
@@ -1332,6 +1352,74 @@ func TestOutboundTransformer_TransformStream_CreatedAtCompatibility(t *testing.T
 			require.Len(t, last.Choices, 1)
 			require.Equal(t, "stop", lo.FromPtr(last.Choices[0].FinishReason))
 			require.Equal(t, int64(1786360449), last.Created)
+		})
+	}
+}
+
+func TestOutboundTransformer_TransformStream_PreservesOfficialWebSocketError(t *testing.T) {
+	trans, err := NewOutboundTransformer("https://api.openai.com", "test-api-key")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		data     string
+		wantType string
+	}{
+		{
+			name:     "official nested error",
+			wantType: "invalid_request_error",
+			data: `{
+				"type":"error",
+				"status":400,
+				"error":{
+					"type":"invalid_request_error",
+					"code":"invalid_value",
+					"message":"invalid websocket request",
+					"param":"input"
+				}
+			}`,
+		},
+		{
+			name:     "partial nested error retains flattened fields",
+			wantType: "invalid_request_error",
+			data: `{
+				"type":"error",
+				"status":400,
+				"code":"invalid_value",
+				"message":"invalid websocket request",
+				"param":"input",
+				"error":{"type":"invalid_request_error"}
+			}`,
+		},
+		{
+			name:     "legacy flattened error has a type",
+			wantType: "error",
+			data: `{
+				"type":"error",
+				"status":400,
+				"code":"invalid_value",
+				"message":"invalid websocket request",
+				"param":"input"
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream, err := trans.TransformStream(t.Context(), nil, streams.SliceStream([]*httpclient.StreamEvent{{
+				Type: "error",
+				Data: []byte(tt.data),
+			}}))
+			require.NoError(t, err)
+			require.False(t, stream.Next())
+
+			var responseErr *llm.ResponseError
+			require.ErrorAs(t, stream.Err(), &responseErr)
+			require.Equal(t, 400, responseErr.StatusCode)
+			require.Equal(t, tt.wantType, responseErr.Detail.Type)
+			require.Equal(t, "invalid_value", responseErr.Detail.Code)
+			require.Equal(t, "invalid websocket request", responseErr.Detail.Message)
+			require.Equal(t, "input", responseErr.Detail.Param)
 		})
 	}
 }

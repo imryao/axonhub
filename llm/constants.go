@@ -19,6 +19,8 @@ const (
 	RequestTypeTranslation RequestType = "translation"
 	// RequestTypeModeration is the content moderation request type, maps to /v1/moderations.
 	RequestTypeModeration RequestType = "moderation"
+	// RequestTypeAlphaSearch is the Codex/CPA alpha search request type, maps to /v1/alpha/search.
+	RequestTypeAlphaSearch RequestType = "alpha_search"
 )
 
 func (r RequestType) String() string {
@@ -28,20 +30,25 @@ func (r RequestType) String() string {
 type APIFormat string
 
 const (
-	APIFormatOpenAIChatCompletion  APIFormat = "openai/chat_completions"
-	APIFormatOpenAICompletion      APIFormat = "openai/completions"
-	APIFormatOpenAIResponse        APIFormat = "openai/responses"
-	APIFormatOpenAIResponseCompact APIFormat = "openai/responses_compact"
-	APIFormatOpenAIImageGeneration APIFormat = "openai/image_generation"
-	APIFormatOpenAIImageEdit       APIFormat = "openai/image_edit"
-	APIFormatOpenAIImageVariation  APIFormat = "openai/image_variation"
-	APIFormatOpenAIEmbedding       APIFormat = "openai/embeddings"
-	APIFormatOpenAIVideo           APIFormat = "openai/video"
+	APIFormatOpenAIChatCompletion APIFormat = "openai/chat_completions"
+	APIFormatOpenAICompletion     APIFormat = "openai/completions"
+	APIFormatOpenAIResponse       APIFormat = "openai/responses"
+	// APIFormatOpenAIResponseWebSocket identifies a downstream Responses
+	// WebSocket request in persisted request/trace metadata. Upstream channel
+	// selection continues to use APIFormatOpenAIResponse with websocket transport.
+	APIFormatOpenAIResponseWebSocket APIFormat = "openai/responses-ws"
+	APIFormatOpenAIResponseCompact   APIFormat = "openai/responses_compact"
+	APIFormatOpenAIImageGeneration   APIFormat = "openai/image_generation"
+	APIFormatOpenAIImageEdit         APIFormat = "openai/image_edit"
+	APIFormatOpenAIImageVariation    APIFormat = "openai/image_variation"
+	APIFormatOpenAIEmbedding         APIFormat = "openai/embeddings"
+	APIFormatOpenAIVideo             APIFormat = "openai/video"
 
 	APIFormatOpenAISpeech        APIFormat = "openai/audio_speech"
 	APIFormatOpenAITranscription APIFormat = "openai/audio_transcriptions"
 	APIFormatOpenAITranslation   APIFormat = "openai/audio_translations"
 	APIFormatOpenAIModeration    APIFormat = "openai/moderations"
+	APIFormatOpenAIAlphaSearch   APIFormat = "openai/alpha_search"
 	APIFormatGeminiContents      APIFormat = "gemini/contents"
 	APIFormatAnthropicMessage    APIFormat = "anthropic/messages"
 	APIFormatAiSDKText           APIFormat = "aisdk/text"
@@ -54,6 +61,7 @@ const (
 
 	APIFormatOllamaChat    APIFormat = "ollama/chat"
 	APIFormatSeedanceVideo APIFormat = "seedance/video"
+	APIFormatZenmuxVideo   APIFormat = "zenmux/video"
 )
 
 func (f APIFormat) String() string {

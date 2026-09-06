@@ -16,6 +16,7 @@ import (
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/internal/pkg/xurl"
 	"github.com/looplj/axonhub/llm/transformer"
 )
 
@@ -95,6 +96,21 @@ func (t *OutboundTransformer) buildImageGenerateRequest(chatReq *llm.Request, ap
 
 	// Extract image generation parameters from Image field
 	img := chatReq.Image
+
+	// Forward input images for image-to-image generation (gpt-image-1)
+	if len(img.Images) > 0 {
+		dataURLs := make([]string, len(img.Images))
+		for i, data := range img.Images {
+			dataURLs[i] = encodeImageBytesToDataURL(data)
+		}
+
+		if len(dataURLs) == 1 {
+			reqBody["image"] = dataURLs[0]
+		} else {
+			reqBody["image"] = dataURLs
+		}
+	}
+
 	if img.N != nil {
 		reqBody["n"] = *img.N
 	}
@@ -191,21 +207,12 @@ func (t *OutboundTransformer) buildImageEditRequest(chatReq *llm.Request, apiKey
 	// Convert raw image bytes to FormFiles
 
 	for i, data := range chatReq.Image.Images {
-		formFiles = append(formFiles, FormFile{
-			Filename:    fmt.Sprintf("image_%d.png", i+1),
-			ContentType: "image/png",
-			Data:        data,
-			Format:      "png",
-		})
+		formFiles = append(formFiles, newImageFormFile(fmt.Sprintf("image_%d", i+1), data))
 	}
 
 	if len(chatReq.Image.Mask) > 0 {
-		maskFile = &FormFile{
-			Filename:    "mask.png",
-			ContentType: "image/png",
-			Data:        chatReq.Image.Mask,
-			Format:      "png",
-		}
+		file := newImageFormFile("mask", chatReq.Image.Mask)
+		maskFile = &file
 	}
 
 	if len(formFiles) == 0 {
@@ -410,12 +417,7 @@ func (t *OutboundTransformer) buildImageVariationRequest(chatReq *llm.Request, a
 
 	// Convert raw image bytes to FormFiles
 	for i, data := range chatReq.Image.Images {
-		formFiles = append(formFiles, FormFile{
-			Filename:    fmt.Sprintf("image_%d.png", i+1),
-			ContentType: "image/png",
-			Data:        data,
-			Format:      "png",
-		})
+		formFiles = append(formFiles, newImageFormFile(fmt.Sprintf("image_%d", i+1), data))
 	}
 
 	if len(formFiles) == 0 {
@@ -532,6 +534,34 @@ type FormFile struct {
 	Format      string `json:"format"` // image format like "png", "jpeg", etc.
 }
 
+func newImageFormFile(name string, data []byte) FormFile {
+	contentType := http.DetectContentType(data)
+	extension := "png"
+	format := "png"
+
+	switch contentType {
+	case "image/jpeg":
+		extension = "jpg"
+		format = "jpg"
+	case "image/gif":
+		extension = "gif"
+		format = "gif"
+	case "image/webp":
+		extension = "webp"
+		format = "webp"
+	case "image/png":
+	default:
+		contentType = "image/png"
+	}
+
+	return FormFile{
+		Filename:    fmt.Sprintf("%s.%s", name, extension),
+		ContentType: contentType,
+		Data:        data,
+		Format:      format,
+	}
+}
+
 // transformImageGenerationResponse transforms the OpenAI Image Generation/Edit API response
 // to the unified llm.Response format.
 func transformImageGenerationResponse(httpResp *httpclient.Response) (*llm.Response, error) {
@@ -630,6 +660,7 @@ type ImagesResponseUsage struct {
 	TotalTokens         int64                                   `json:"total_tokens"`
 	InputTokensDetails  *ImagesResponseUsageInputTokensDetails  `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails *ImagesResponseUsageOutputTokensDetails `json:"output_tokens_details,omitempty"`
+	Cost                *float64                                `json:"cost,omitempty"`
 }
 
 // ImagesResponseUsageInputTokensDetails represents detailed input token information.
@@ -686,4 +717,15 @@ func extractFile(url string) (FormFile, error) {
 	}
 
 	return FormFile{}, fmt.Errorf("%w: only data URLs are supported for image editing", transformer.ErrInvalidRequest)
+}
+
+// encodeImageBytesToDataURL encodes raw image bytes to a base64 data URL
+// suitable for JSON API request bodies (e.g. the image field in images/generations).
+func encodeImageBytesToDataURL(data []byte) string {
+	contentType := http.DetectContentType(data)
+	if !strings.HasPrefix(contentType, "image/") {
+		contentType = "image/png"
+	}
+
+	return xurl.BuildDataURL(contentType, base64.StdEncoding.EncodeToString(data), true)
 }

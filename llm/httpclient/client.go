@@ -26,22 +26,31 @@ const MaxErrorBodySize = 1 << 20 // 1 MB
 
 // HttpClient implements the HttpClient interface.
 type HttpClient struct {
-	client      *http.Client
-	proxyConfig *ProxyConfig
-	opts        []ClientOption
+	client               *http.Client
+	proxyConfig          *ProxyConfig
+	opts                 []ClientOption
+	rejectHTTPSDowngrade bool
 }
 
 // ClientOption configures an HttpClient.
 type ClientOption func(*clientOptions)
 
 type clientOptions struct {
-	insecureSkipVerify bool
+	insecureSkipVerify   bool
+	rejectHTTPSDowngrade bool
 }
 
 // WithInsecureSkipVerify disables TLS certificate verification.
 func WithInsecureSkipVerify(skip bool) ClientOption {
 	return func(o *clientOptions) {
 		o.insecureSkipVerify = skip
+	}
+}
+
+// WithRejectHTTPSDowngrade rejects redirects from HTTPS to HTTP.
+func WithRejectHTTPSDowngrade(reject bool) ClientOption {
+	return func(o *clientOptions) {
+		o.rejectHTTPSDowngrade = reject
 	}
 }
 
@@ -75,19 +84,56 @@ func NewHttpClientWithProxy(proxyConfig *ProxyConfig, opts ...ClientOption) *Htt
 		}
 	}
 
+	client := &http.Client{Transport: transport}
+	if options.rejectHTTPSDowngrade {
+		client.CheckRedirect = rejectHTTPSDowngrade
+	}
+
 	return &HttpClient{
-		client: &http.Client{
-			Transport: transport,
-		},
-		proxyConfig: proxyConfig,
-		opts:        opts,
+		client:               client,
+		proxyConfig:          proxyConfig,
+		opts:                 opts,
+		rejectHTTPSDowngrade: options.rejectHTTPSDowngrade,
 	}
 }
 
 // WithProxy returns a new HttpClient that uses the given proxy configuration,
 // while preserving all other options (e.g., InsecureSkipVerify) from the original client.
 func (hc *HttpClient) WithProxy(proxyConfig *ProxyConfig) *HttpClient {
-	return NewHttpClientWithProxy(proxyConfig, hc.opts...)
+	opts := append([]ClientOption(nil), hc.opts...)
+	if hc.rejectHTTPSDowngrade {
+		opts = append(opts, WithRejectHTTPSDowngrade(true))
+	}
+	return NewHttpClientWithProxy(proxyConfig, opts...)
+}
+
+// WithRejectHTTPSDowngrade returns a client that preserves all current options
+// and rejects redirects that would send a request from HTTPS to HTTP.
+func (hc *HttpClient) WithRejectHTTPSDowngrade() *HttpClient {
+	client := *hc.client
+	previousCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := rejectHTTPSDowngrade(req, via); err != nil {
+			return err
+		}
+		if previousCheckRedirect != nil {
+			return previousCheckRedirect(req, via)
+		}
+		return nil
+	}
+	return &HttpClient{
+		client:               &client,
+		proxyConfig:          hc.proxyConfig,
+		opts:                 hc.opts,
+		rejectHTTPSDowngrade: true,
+	}
+}
+
+func rejectHTTPSDowngrade(req *http.Request, via []*http.Request) error {
+	if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme == "http" {
+		return fmt.Errorf("refusing HTTPS to HTTP redirect")
+	}
+	return nil
 }
 
 // GetNativeClient returns the underlying *http.Client for advanced use cases.
@@ -145,7 +191,7 @@ func getProxyFunc(config *ProxyConfig) func(*http.Request) (*url.URL, error) {
 			proxyURL.User = url.UserPassword(config.Username, config.Password)
 		}
 
-		slog.DebugContext(context.Background(), "use custom proxy", slog.Any("proxy_url", proxyURL.Redacted()))
+		slog.DebugContext(context.Background(), "use custom proxy", slog.String("proxy_url", urlForLog(proxyURL)))
 
 		return http.ProxyURL(proxyURL)
 
@@ -209,12 +255,14 @@ func NewHttpClientWithClient(client *http.Client) *HttpClient {
 
 // Do executes the HTTP request.
 func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, error) {
-	slog.DebugContext(ctx, "execute http request", slog.Any("request", request), slog.Any("proxy", hc.proxyConfig))
-
 	rawReq, err := hc.BuildHttpRequest(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build HTTP request: %w", err)
 	}
+	slog.DebugContext(ctx, "execute http request",
+		slog.String("method", rawReq.Method),
+		slog.String("url", urlForLog(rawReq.URL)),
+		slog.Int("body_size", len(request.Body)))
 
 	// Only set the default Accept when the transformer did not specify one
 	// (e.g. TTS sets Accept: */* to receive binary audio).
@@ -248,9 +296,9 @@ func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, erro
 		if slog.Default().Enabled(ctx, slog.LevelDebug) {
 			slog.DebugContext(ctx, "HTTP request failed",
 				slog.String("method", rawReq.Method),
-				slog.String("url", rawReq.URL.String()),
+				slog.String("url", urlForLog(rawReq.URL)),
 				slog.Int("status_code", rawResp.StatusCode),
-				slog.String("body", string(body)))
+				slog.Int("body_size", len(body)))
 		}
 
 		return nil, &Error{
@@ -271,9 +319,9 @@ func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, erro
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		slog.DebugContext(ctx, "HTTP request success",
 			slog.String("method", rawReq.Method),
-			slog.String("url", rawReq.URL.String()),
+			slog.String("url", urlForLog(rawReq.URL)),
 			slog.Int("status_code", rawResp.StatusCode),
-			slog.String("body", string(body)))
+			slog.Int("body_size", len(body)))
 	}
 
 	// Build generic response
@@ -292,12 +340,14 @@ func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, erro
 
 // DoStream executes a streaming HTTP request using Server-Sent Events.
 func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.Stream[*StreamEvent], error) {
-	slog.DebugContext(ctx, "execute stream request", slog.Any("request", request))
-
 	rawReq, err := hc.BuildHttpRequest(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build HTTP request: %w", err)
 	}
+	slog.DebugContext(ctx, "execute stream request",
+		slog.String("method", rawReq.Method),
+		slog.String("url", urlForLog(rawReq.URL)),
+		slog.Int("body_size", len(request.Body)))
 
 	// Add streaming headers. Force SSE Accept unless the outbound transformer
 	// explicitly opted into a non-JSON Accept (e.g. "*/*" for binary TTS chunks),
@@ -334,9 +384,9 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 		if slog.Default().Enabled(ctx, slog.LevelDebug) {
 			slog.DebugContext(ctx, "HTTP stream request failed",
 				slog.String("method", rawReq.Method),
-				slog.String("url", rawReq.URL.String()),
+				slog.String("url", urlForLog(rawReq.URL)),
 				slog.Int("status_code", rawResp.StatusCode),
-				slog.String("body", string(body)))
+				slog.Int("body_size", len(body)))
 		}
 
 		return nil, &Error{
@@ -372,6 +422,18 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 	stream := decoderFactory(ctx, rawResp.Body)
 
 	return stream, nil
+}
+
+func urlForLog(value *url.URL) string {
+	if value == nil {
+		return ""
+	}
+	redacted := *value
+	redacted.User = nil
+	redacted.RawQuery = ""
+	redacted.ForceQuery = false
+	redacted.Fragment = ""
+	return redacted.String()
 }
 
 // BuildHttpRequest builds an HTTP request from Request.

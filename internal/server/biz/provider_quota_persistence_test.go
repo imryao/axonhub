@@ -152,7 +152,7 @@ func TestProviderQuotaService_SaveQuotaError_ResetsChangedProviderIdentity(t *te
 		checkInterval:   5 * time.Minute,
 	}
 	now := time.Now()
-	service.saveQuotaError(ctx, channelWithStatus, "synthetic", errors.New("synthetic quota unavailable"), now)
+	service.saveQuotaError(ctx, channelWithStatus, "synthetic", "", errors.New("synthetic quota unavailable"), 1, now)
 
 	persisted, err := client.ProviderQuotaStatus.Query().
 		Where(providerquotastatus.ChannelIDEQ(channelEntity.ID)).
@@ -163,7 +163,8 @@ func TestProviderQuotaService_SaveQuotaError_ResetsChangedProviderIdentity(t *te
 	require.False(t, persisted.Ready)
 	require.Nil(t, persisted.NextResetAt)
 	require.EqualValues(t, 1, persisted.QuotaData["error_count"])
-	require.Equal(t, "synthetic quota unavailable", persisted.QuotaData["error"])
+	require.Equal(t, "check_failed", persisted.QuotaData["error_code"])
+	require.NotContains(t, persisted.QuotaData, "error")
 	require.NotContains(t, persisted.QuotaData, "_limits")
 
 	cachedValue, ok := service.quotaCache.Load(channelEntity.ID)
@@ -230,7 +231,7 @@ func TestProviderQuotaService_SaveQuotaStatus_ReplacesStaleClinePassDataWhenUnav
 		AbstractService: &AbstractService{db: client},
 		checkInterval:   5 * time.Minute,
 	}
-	service.saveQuotaStatus(ctx, channelEntity.ID, "cline", provider_quota.QuotaData{
+	service.saveQuotaStatus(ctx, channelEntity.ID, "cline", "", provider_quota.QuotaData{
 		ProviderType: "cline",
 		Status:       string(providerquotastatus.StatusExhausted),
 		Ready:        false,
@@ -295,7 +296,7 @@ func TestProviderQuotaService_SaveQuotaStatus_UpdatesChangedProviderIdentity(t *
 		AbstractService: &AbstractService{db: client},
 		checkInterval:   5 * time.Minute,
 	}
-	service.saveQuotaStatus(ctx, channelEntity.ID, "synthetic", provider_quota.QuotaData{
+	service.saveQuotaStatus(ctx, channelEntity.ID, "synthetic", "", provider_quota.QuotaData{
 		ProviderType: "synthetic",
 		Status:       string(providerquotastatus.StatusAvailable),
 		Ready:        true,

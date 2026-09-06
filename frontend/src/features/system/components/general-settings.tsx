@@ -17,8 +17,11 @@ import {
   useUpdateUserAgentPassThroughSettings,
   usePassThroughSettings,
   useUpdatePassThroughSettings,
+  useUsageCostInjectionSettings,
+  useUpdateUsageCostInjectionSettings,
 } from '../data/system';
 import { GMTTimeZoneOptions } from '../data/timezones';
+import { CatalogSettings } from './catalog-settings';
 
 export function GeneralSettings() {
   const { t } = useTranslation();
@@ -35,6 +38,10 @@ export function GeneralSettings() {
   const { data: ptSettings, isLoading: isLoadingPTSettings } = usePassThroughSettings();
   const updatePTSettings = useUpdatePassThroughSettings();
   const [passThroughEnabled, setPassThroughEnabled] = useState(false);
+
+  const { data: usageCostSettings, isLoading: isLoadingUsageCostSettings } = useUsageCostInjectionSettings();
+  const updateUsageCostSettings = useUpdateUsageCostInjectionSettings();
+  const [usageCostInjectionEnabled, setUsageCostInjectionEnabled] = useState(false);
 
   const [currencyCode, setCurrencyCode] = useState('USD');
   const [timezone, setTimezone] = useState('UTC');
@@ -72,6 +79,12 @@ export function GeneralSettings() {
     }
   }, [ptSettings]);
 
+  useEffect(() => {
+    if (usageCostSettings) {
+      setUsageCostInjectionEnabled(usageCostSettings.enabled);
+    }
+  }, [usageCostSettings]);
+
   const handleSave = async () => {
     setIsLoading(true);
     try {
@@ -103,6 +116,16 @@ export function GeneralSettings() {
     } catch {
       // Revert state on error
       setPassThroughEnabled(previousValue);
+    }
+  };
+
+  const handleUsageCostInjectionChange = async (enabled: boolean) => {
+    const previousValue = usageCostInjectionEnabled;
+    setUsageCostInjectionEnabled(enabled);
+    try {
+      await updateUsageCostSettings.mutateAsync({ enabled });
+    } catch {
+      setUsageCostInjectionEnabled(previousValue);
     }
   };
 
@@ -189,6 +212,29 @@ export function GeneralSettings() {
           </div>
         </CardContent>
       </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t('system.usageCostInjection.title')}</CardTitle>
+          <CardDescription>{t('system.usageCostInjection.description')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className='flex items-center justify-between'>
+            <div className='space-y-0.5'>
+              <Label htmlFor='usage-cost-injection'>{t('system.usageCostInjection.label')}</Label>
+              <div className='text-muted-foreground text-sm'>{t('system.usageCostInjection.helpText')}</div>
+            </div>
+            <Switch
+              id='usage-cost-injection'
+              checked={usageCostInjectionEnabled}
+              onCheckedChange={handleUsageCostInjectionChange}
+              disabled={isLoadingUsageCostSettings || updateUsageCostSettings.isPending}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <CatalogSettings />
 
       {hasChanges && (
         <div className='flex justify-end'>

@@ -285,22 +285,37 @@ function filterProviders(data, allowedIds) {
 		}
 	}
 
-	// Map llama channel's llama models to meta developer
-	if (allowedIds.includes("meta") && data.providers.llama) {
-		const llamaProvider = data.providers.llama;
-		const llamaModels = (llamaProvider.models || []).filter((m) =>
-			m.id?.toLowerCase().startsWith("llama"),
-		);
-		if (llamaModels.length > 0) {
+	// Build meta developer from upstream meta provider (Meta Model API,
+	// carries the Muse lineup) plus llama channel's llama models
+	if (allowedIds.includes("meta")) {
+		const metaModels = new Map();
+		const upstreamMeta = data.providers.meta || null;
+
+		if (upstreamMeta) {
+			for (const model of upstreamMeta.models || []) {
+				metaModels.set(model.id, deepClone(model));
+			}
+		}
+
+		if (data.providers.llama) {
+			for (const model of data.providers.llama.models || []) {
+				if (!model.id?.toLowerCase().startsWith("llama")) continue;
+				if (!metaModels.has(model.id)) {
+					metaModels.set(model.id, deepClone(model));
+				}
+			}
+		}
+
+		if (metaModels.size > 0) {
 			filtered.meta = {
-				...llamaProvider,
+				...(upstreamMeta || data.providers.llama || {}),
 				id: "meta",
 				name: "Meta",
 				display_name: "Meta",
-				models: llamaModels,
+				models: Array.from(metaModels.values()),
 			};
 			console.log(
-				`Mapped ${llamaModels.length} llama models to meta developer`,
+				`Merged ${metaModels.size} models (muse + llama) into meta developer`,
 			);
 		}
 	}
@@ -395,7 +410,9 @@ function filterProviders(data, allowedIds) {
 					: id;
 				const isTencentModel =
 					normalizedId === "hy3" ||
+					normalizedId === "hy4" ||
 					normalizedId.startsWith("hy3-") ||
+					normalizedId.startsWith("hy4-") ||
 					normalizedId.startsWith("hunyuan-");
 
 				if (!isTencentModel || mergedModels.has(normalizedId)) continue;
@@ -412,7 +429,7 @@ function filterProviders(data, allowedIds) {
 				models: Array.from(mergedModels.values()),
 			};
 			console.log(
-				`Merged ${mergedModels.size} Hy3/Hunyuan models into Tencent developer`,
+				`Merged ${mergedModels.size} Hy3/Hy4/Hunyuan models into Tencent developer`,
 			);
 		}
 	}
@@ -574,8 +591,25 @@ async function main() {
 		console.log("Sorting models by release date...");
 		sortModelsByDate(filtered);
 
+		const serialized = `${JSON.stringify(filtered, null, 2)}\n`;
 		console.log("Writing to:", OUTPUT_PATH);
-		fs.writeFileSync(OUTPUT_PATH, `${JSON.stringify(filtered, null, 2)}\n`);
+		fs.writeFileSync(OUTPUT_PATH, serialized);
+
+		const backendFallbackPath = path.join(
+			__dirname,
+			"../../internal/server/biz/catalogdata/providers.json",
+		);
+		fs.mkdirSync(path.dirname(backendFallbackPath), { recursive: true });
+		console.log("Writing backend fallback to:", backendFallbackPath);
+		fs.writeFileSync(backendFallbackPath, serialized);
+
+		const backendModelsPath = path.join(
+			__dirname,
+			"../../internal/server/biz/catalogdata/models.json",
+		);
+		if (fs.existsSync(MODELS_JSON_PATH)) {
+			fs.copyFileSync(MODELS_JSON_PATH, backendModelsPath);
+		}
 
 		console.log("Sync completed successfully!");
 	} catch (error) {

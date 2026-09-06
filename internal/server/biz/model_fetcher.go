@@ -24,6 +24,7 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/gemini/vertex"
 	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 	"github.com/looplj/axonhub/llm/transformer/openai/copilot"
+	"github.com/looplj/axonhub/llm/transformer/xai/subscription"
 )
 
 const providerConfCacheDuration = 1 * time.Hour
@@ -178,6 +179,31 @@ func isQiniuChannelType(channelType channel.Type) bool {
 	return channelType == channel.TypeQiniu || channelType == channel.TypeQiniuAnthropic
 }
 
+func isCommandCodeChannelType(channelType channel.Type) bool {
+	return channelType == channel.TypeCommandcode || channelType == channel.TypeCommandcodeAnthropic
+}
+
+// Command Code exposes model IDs without protocol metadata. Its Anthropic
+// models currently use the Claude family prefixes, so route those models to
+// the Anthropic channel and keep the remaining models on the OpenAI channel.
+func isCommandCodeAnthropicModel(modelID string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(modelID))
+	return normalized == "claude" ||
+		strings.HasPrefix(normalized, "claude-") ||
+		strings.HasPrefix(normalized, "anthropic/claude-")
+}
+
+func filterCommandCodeModels(channelType channel.Type, models []ModelIdentify) []ModelIdentify {
+	if !isCommandCodeChannelType(channelType) {
+		return models
+	}
+
+	wantAnthropic := channelType == channel.TypeCommandcodeAnthropic
+	return lo.Filter(models, func(model ModelIdentify, _ int) bool {
+		return isCommandCodeAnthropicModel(model.ID) == wantAnthropic
+	})
+}
+
 func (f *ModelFetcher) getDefaultModelsByType(ctx context.Context, typ channel.Type) []ModelIdentify {
 	//nolint:exhaustive // only supports default model fetching for specific channel types.
 	switch typ {
@@ -187,6 +213,8 @@ func (f *ModelFetcher) getDefaultModelsByType(ctx context.Context, typ channel.T
 		return lo.Map(codex.DefaultModels(), func(id string, _ int) ModelIdentify { return ModelIdentify{ID: id} })
 	case channel.TypeClaudecode:
 		return lo.Map(claudecode.DefaultModels(), func(id string, _ int) ModelIdentify { return ModelIdentify{ID: id} })
+	case channel.TypeXaiSubscription:
+		return lo.Map(subscription.DefaultModels(), func(id string, _ int) ModelIdentify { return ModelIdentify{ID: id} })
 	case channel.TypeGithubCopilot:
 		return f.fetchCopilotModels(ctx)
 	case channel.TypeGeminiVertex:
@@ -200,7 +228,7 @@ func (f *ModelFetcher) getDefaultModelsByType(ctx context.Context, typ channel.T
 // only be returned for official (OAuth) channels. Non-official channels of these
 // types should fetch models from the provider API instead.
 func isOfficialOnlyType(typ channel.Type) bool {
-	return typ == channel.TypeClaudecode || typ == channel.TypeCodex
+	return typ == channel.TypeClaudecode || typ == channel.TypeCodex || typ == channel.TypeXaiSubscription
 }
 
 // fetchCopilotModels fetches GitHub Copilot models from PublicProviderConf with caching.
@@ -439,6 +467,14 @@ func (f *ModelFetcher) FetchModels(ctx context.Context, input FetchModelsInput) 
 			Error:  lo.ToPtr(fmt.Sprintf("invalid channel type: %v", err)),
 		}, nil
 	}
+	if isCommandCodeChannelType(channelType) {
+		if err := validateCommandCodeBaseURL(input.BaseURL); err != nil {
+			return &FetchModelsResult{
+				Models: []ModelIdentify{},
+				Error:  lo.ToPtr(err.Error()),
+			}, nil
+		}
+	}
 
 	modelsURL, authHeaders := f.prepareModelsEndpoint(channelType, input.BaseURL)
 
@@ -463,7 +499,10 @@ func (f *ModelFetcher) FetchModels(ctx context.Context, input FetchModelsInput) 
 		Headers: authHeaders,
 	}
 
-	if channelType.UsesAnthropicModelAPI() {
+	if isCommandCodeChannelType(channelType) {
+		// Command Code authenticates with a Bearer API key, never X-Api-Key.
+		req.Headers.Set("Authorization", "Bearer "+apiKey)
+	} else if channelType.UsesAnthropicModelAPI() {
 		req.Headers.Set("X-Api-Key", apiKey)
 	} else if channelType.IsGemini() {
 		req.Headers.Set("X-Goog-Api-Key", apiKey)
@@ -474,6 +513,9 @@ func (f *ModelFetcher) FetchModels(ctx context.Context, input FetchModelsInput) 
 	httpClient := f.httpClient
 	if proxyConfig != nil {
 		httpClient = f.httpClient.WithProxy(proxyConfig)
+	}
+	if isCommandCodeChannelType(channelType) {
+		httpClient = httpClient.WithRejectHTTPSDowngrade()
 	}
 
 	if channelType.IsGemini() {
@@ -496,7 +538,7 @@ func (f *ModelFetcher) FetchModels(ctx context.Context, input FetchModelsInput) 
 		err  error
 	)
 
-	if channelType.UsesAnthropicModelAPI() {
+	if channelType.UsesAnthropicModelAPI() && !isCommandCodeChannelType(channelType) {
 		resp, err = httpClient.Do(ctx, req)
 		if err != nil || resp.StatusCode != http.StatusOK {
 			req.Headers.Del("X-Api-Key")
@@ -542,6 +584,10 @@ func (f *ModelFetcher) FetchModels(ctx context.Context, input FetchModelsInput) 
 			Models: []ModelIdentify{},
 			Error:  lo.ToPtr(fmt.Sprintf("failed to parse models response: %v", err)),
 		}, nil
+	}
+
+	if isCommandCodeChannelType(channelType) {
+		models = filterCommandCodeModels(channelType, models)
 	}
 
 	return &FetchModelsResult{
@@ -644,6 +690,8 @@ func (f *ModelFetcher) prepareModelsEndpoint(channelType channel.Type, baseURL s
 		useRawURL = true
 	}
 
+	baseURL = httpModelsBaseURL(baseURL)
+
 	switch {
 	case channelType.IsAnthropic() || channelType == channel.TypeClaudecode:
 		headers.Set("Anthropic-Version", "2023-06-01")
@@ -672,6 +720,19 @@ func (f *ModelFetcher) prepareModelsEndpoint(channelType channel.Type, baseURL s
 	case channelType == channel.TypeDoubaoAnthropic:
 		baseURL = strings.TrimSuffix(baseURL, "/compatible")
 		return baseURL + "/v3/models", headers
+	case isCommandCodeChannelType(channelType):
+		baseURL = strings.TrimSuffix(baseURL, "/anthropic")
+		baseURL = strings.TrimSuffix(baseURL, "/claude")
+
+		if useRawURL {
+			return baseURL + "/models", headers
+		}
+
+		if strings.HasSuffix(baseURL, "/v1") {
+			return baseURL + "/models", headers
+		}
+
+		return baseURL + "/v1/models", headers
 	case channelType.IsAnthropicLike():
 		baseURL = strings.TrimSuffix(baseURL, "/anthropic")
 		baseURL = strings.TrimSuffix(baseURL, "/claude")
@@ -705,6 +766,24 @@ func (f *ModelFetcher) prepareModelsEndpoint(channelType channel.Type, baseURL s
 
 		return baseURL + "/v1/models", headers
 	}
+}
+
+// httpModelsBaseURL converts a channel's WebSocket endpoint to the matching
+// HTTP endpoint used by the provider's model listing API.
+func httpModelsBaseURL(baseURL string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return baseURL
+	}
+
+	switch parsed.Scheme {
+	case "ws":
+		parsed.Scheme = "http"
+	case "wss":
+		parsed.Scheme = "https"
+	}
+
+	return parsed.String()
 }
 
 type GeminiModelResponse struct {

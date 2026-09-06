@@ -422,7 +422,7 @@ type Channel implements Node {
   tags: [String!]
   defaultTestModel: String!
   policies: ChannelPolicies @goField(forceResolver: true)
-  settings: ChannelSettings
+  settings: ChannelSettings @goField(forceResolver: true)
   """
   Ordering weight for display sorting
   """
@@ -1294,6 +1294,8 @@ enum ChannelType @goModel(model: "github.com/looplj/axonhub/internal/ent/channel
   xiaomi
   xiaomi_anthropic
   xai
+  xai_responses
+  xai_subscription
   ppio
   siliconflow
   volcengine
@@ -1326,6 +1328,12 @@ enum ChannelType @goModel(model: "github.com/looplj/axonhub/internal/ent/channel
   groq
   qiniu_anthropic
   fenno
+  zenmux
+  zenmux_responses
+  zenmux_anthropic
+  zenmux_gemini
+  commandcode
+  commandcode_anthropic
 }
 """
 ChannelWhereInput is used for filtering Channel objects.
@@ -3719,6 +3727,10 @@ type ProviderQuotaStatus implements Node {
   Timestamp for next scheduled quota check
   """
   nextCheckAt: Time!
+  """
+  Quota account identity shared by channels drawing from the same provider account (e.g. the same ZenMux management key). Empty means the channel has its own quota account. Never stores the raw credential.
+  """
+  accountKey: String
   channel: Channel!
 }
 """
@@ -3747,6 +3759,8 @@ ProviderQuotaStatusProviderType is enum for the field provider_type
 enum ProviderQuotaStatusProviderType @goModel(model: "github.com/looplj/axonhub/internal/ent/providerquotastatus.ProviderType") {
   claudecode
   codex
+  antigravity
+  xai_subscription
   github_copilot
   nanogpt
   cline
@@ -3758,6 +3772,9 @@ enum ProviderQuotaStatusProviderType @goModel(model: "github.com/looplj/axonhub/
   kimi_code
   minimax
   zhipu
+  charm_hyper
+  zenmux
+  commandcode
 }
 """
 ProviderQuotaStatusStatus is enum for the field status
@@ -3859,6 +3876,24 @@ input ProviderQuotaStatusWhereInput {
   nextCheckAtGTE: Time
   nextCheckAtLT: Time
   nextCheckAtLTE: Time
+  """
+  account_key field predicates
+  """
+  accountKey: String
+  accountKeyNEQ: String
+  accountKeyIn: [String!]
+  accountKeyNotIn: [String!]
+  accountKeyGT: String
+  accountKeyGTE: String
+  accountKeyLT: String
+  accountKeyLTE: String
+  accountKeyContains: String
+  accountKeyHasPrefix: String
+  accountKeyHasSuffix: String
+  accountKeyIsNil: Boolean
+  accountKeyNotNil: Boolean
+  accountKeyEqualFold: String
+  accountKeyContainsFold: String
   """
   channel edge predicates
   """

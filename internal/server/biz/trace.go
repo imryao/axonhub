@@ -659,6 +659,8 @@ func requestToSegment(ctx context.Context, req *ent.Request) (*Segment, error) {
 			requestSpans = append(requestSpans, extractSpansFromImageRequestBody(req.RequestBody, fmt.Sprintf("request-%d", req.ID))...)
 		} else if isModerationFormat(apiFormat) {
 			requestSpans = append(requestSpans, extractSpansFromModerationRequestBody(req.RequestBody, fmt.Sprintf("request-%d", req.ID))...)
+		} else if isAlphaSearchFormat(apiFormat) {
+			// Alpha search is an opaque provider payload; it is not message-shaped.
 		} else {
 			httpReq := &httpclient.Request{
 				Body: req.RequestBody,
@@ -672,16 +674,18 @@ func requestToSegment(ctx context.Context, req *ent.Request) (*Segment, error) {
 
 			inbound, err := getInboundTransformer(apiFormat)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get inbound transformer: %w", err)
-			}
+				// Format has no message-shaped request body (e.g. embeddings);
+				// skip it instead of failing the whole trace.
+				log.Warn(ctx, "No inbound transformer for format, skipping request spans", log.Cause(err), log.Int("request_id", req.ID))
+			} else {
+				llmReq, err := inbound.TransformRequest(ctx, httpReq)
+				if err != nil {
+					log.Warn(ctx, "Failed to transform request body", log.Cause(err), log.Int("request_id", req.ID))
+					return segment, nil
+				}
 
-			llmReq, err := inbound.TransformRequest(ctx, httpReq)
-			if err != nil {
-				log.Warn(ctx, "Failed to transform request body", log.Cause(err), log.Int("request_id", req.ID))
-				return segment, nil
+				requestSpans = append(requestSpans, extractSpansFromMessages(llmReq.Messages, fmt.Sprintf("request-%d", req.ID))...)
 			}
-
-			requestSpans = append(requestSpans, extractSpansFromMessages(llmReq.Messages, fmt.Sprintf("request-%d", req.ID))...)
 		}
 	}
 
@@ -703,29 +707,43 @@ func requestToSegment(ctx context.Context, req *ent.Request) (*Segment, error) {
 			segment.Metadata = extractMetadataFromUsage(usage)
 		} else if isModerationFormat(apiFormat) {
 			responseSpans = append(responseSpans, extractSpansFromModerationResponseBody(req.ResponseBody, fmt.Sprintf("response-%d", req.ID))...)
+		} else if isAlphaSearchFormat(apiFormat) {
+			// Alpha search responses are provider-defined JSON and have no usage/messages.
 		} else {
 			outbound, err := getOutboundTransformer(apiFormat)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get outbound transformer: %w", err)
-			}
+				// Format has no message-shaped response body (e.g. embeddings);
+				// skip it instead of failing the whole trace.
+				log.Warn(ctx, "No outbound transformer for format, skipping response spans", log.Cause(err), log.Int("request_id", req.ID))
+			} else {
+				httpReq := &httpclient.Request{
+					APIFormat: req.Format,
+				}
+				if isImageFormat(apiFormat) {
+					httpReq.TransformerMetadata = map[string]any{
+						"model": req.ModelID,
+					}
+				}
 
-			httpResp := &httpclient.Response{
-				Body:       req.ResponseBody,
-				StatusCode: http.StatusOK,
-				Headers: http.Header{
-					"Content-Type": {"application/json"},
-				},
-			}
+				httpResp := &httpclient.Response{
+					Body:       req.ResponseBody,
+					StatusCode: http.StatusOK,
+					Headers: http.Header{
+						"Content-Type": {"application/json"},
+					},
+					Request: httpReq,
+				}
 
-			unifiedResp, err := outbound.TransformResponse(ctx, httpResp)
-			if err != nil {
-				log.Warn(ctx, "Failed to transform response body", log.Cause(err), log.Int("request_id", req.ID))
-				return segment, nil
-			}
+				unifiedResp, err := outbound.TransformResponse(ctx, httpResp)
+				if err != nil {
+					log.Warn(ctx, "Failed to transform response body", log.Cause(err), log.Int("request_id", req.ID))
+					return segment, nil
+				}
 
-			segment.Metadata = extractMetadataFromResponse(unifiedResp)
-			if len(unifiedResp.Choices) > 0 && unifiedResp.Choices[0].Message != nil {
-				responseSpans = append(responseSpans, extractSpansFromMessage(unifiedResp.Choices[0].Message, fmt.Sprintf("response-%d", req.ID))...)
+				segment.Metadata = extractMetadataFromResponse(unifiedResp)
+				if len(unifiedResp.Choices) > 0 && unifiedResp.Choices[0].Message != nil {
+					responseSpans = append(responseSpans, extractSpansFromMessage(unifiedResp.Choices[0].Message, fmt.Sprintf("response-%d", req.ID))...)
+				}
 			}
 		}
 	}
@@ -750,6 +768,10 @@ func isImageFormat(format llm.APIFormat) bool {
 
 func isModerationFormat(format llm.APIFormat) bool {
 	return format == llm.APIFormatOpenAIModeration
+}
+
+func isAlphaSearchFormat(format llm.APIFormat) bool {
+	return format == llm.APIFormatOpenAIAlphaSearch
 }
 
 // extractSpansFromModerationRequestBody extracts display spans from a /v1/moderations request body.
@@ -1496,7 +1518,7 @@ func getInboundTransformer(format llm.APIFormat) (transformer.Inbound, error) {
 	switch format {
 	case llm.APIFormatOpenAIChatCompletion:
 		return openai.NewInboundTransformer(), nil
-	case llm.APIFormatOpenAIResponse:
+	case llm.APIFormatOpenAIResponse, llm.APIFormatOpenAIResponseWebSocket:
 		return responses.NewInboundTransformer(), nil
 	case llm.APIFormatAnthropicMessage:
 		return anthropic.NewInboundTransformer(), nil
@@ -1510,7 +1532,10 @@ func getInboundTransformer(format llm.APIFormat) (transformer.Inbound, error) {
 func getOutboundTransformer(format llm.APIFormat) (transformer.Outbound, error) {
 	//nolint:exhaustive // Checked
 	switch format {
-	case llm.APIFormatOpenAIChatCompletion:
+	case llm.APIFormatOpenAIChatCompletion,
+		llm.APIFormatOpenAIImageGeneration,
+		llm.APIFormatOpenAIImageEdit,
+		llm.APIFormatOpenAIImageVariation:
 		config := &openai.Config{
 			PlatformType:   openai.PlatformOpenAI,
 			BaseURL:        "https://api.openai.com/v1",
@@ -1518,7 +1543,7 @@ func getOutboundTransformer(format llm.APIFormat) (transformer.Outbound, error) 
 		}
 
 		return openai.NewOutboundTransformerWithConfig(config)
-	case llm.APIFormatOpenAIResponse:
+	case llm.APIFormatOpenAIResponse, llm.APIFormatOpenAIResponseWebSocket:
 		return responses.NewOutboundTransformer("https://api.openai.com/v1", "dummy")
 	case llm.APIFormatAnthropicMessage:
 		config := &anthropic.Config{

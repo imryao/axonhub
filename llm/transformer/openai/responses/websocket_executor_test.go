@@ -254,6 +254,88 @@ func TestWebSocketExecutorDoReturnsErrorForTopLevelErrorEvent(t *testing.T) {
 	require.ErrorContains(t, err, "bad_request: invalid websocket request")
 }
 
+func TestTopLevelWebSocketErrorPreservesOfficialErrorStatusAndBody(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "official nested error",
+			data: `{
+				"type":"error",
+				"status":400,
+				"error":{
+					"type":"invalid_request_error",
+					"code":"invalid_value",
+					"message":"invalid websocket request",
+					"param":"input"
+				}
+			}`,
+			want: `{
+				"error":{
+					"type":"invalid_request_error",
+					"code":"invalid_value",
+					"message":"invalid websocket request",
+					"param":"input"
+				}
+			}`,
+		},
+		{
+			name: "legacy flattened error",
+			data: `{
+				"type":"error",
+				"status":400,
+				"code":"invalid_value",
+				"message":"invalid websocket request",
+				"param":"input"
+			}`,
+			want: `{
+				"error":{
+					"type":"invalid_value",
+					"code":"invalid_value",
+					"message":"invalid websocket request",
+					"param":"input"
+				}
+			}`,
+		},
+		{
+			name: "partial nested error retains flattened fields",
+			data: `{
+				"type":"error",
+				"status":400,
+				"code":"invalid_value",
+				"message":"invalid websocket request",
+				"param":"input",
+				"error":{"type":"invalid_request_error","request_id":"req_123"}
+			}`,
+			want: `{
+				"error":{
+					"type":"invalid_request_error",
+					"code":"invalid_value",
+					"message":"invalid websocket request",
+					"param":"input",
+					"request_id":"req_123"
+				}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := TopLevelWebSocketError([]*httpclient.StreamEvent{{
+				Type: "error",
+				Data: []byte(tt.data),
+			}})
+
+			var httpErr *httpclient.Error
+			require.ErrorAs(t, err, &httpErr)
+			require.Equal(t, http.StatusBadRequest, httpErr.StatusCode)
+			require.JSONEq(t, tt.want, string(httpErr.Body))
+		})
+	}
+}
+
 func TestWebSocketExecutorDoAggregatesFailedResponseEvent(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -595,6 +677,86 @@ func TestWebSocketExecutorReconnectsForDifferentExplicitPreviousResponseID(t *te
 	require.Equal(t, int32(2), upgrades.Load())
 }
 
+func TestWebSocketExecutorKeepsConnectionForMatchingExplicitPreviousResponseID(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	var upgrades atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrades.Add(1)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		require.NoError(t, err)
+		defer conn.Close()
+
+		var first map[string]any
+		require.NoError(t, conn.ReadJSON(&first))
+		require.NoError(t, conn.WriteJSON(map[string]any{
+			"type": "response.completed",
+			"response": map[string]any{
+				"id":     "resp_1",
+				"object": "response",
+				"status": "completed",
+				"output": []any{},
+			},
+		}))
+
+		var second map[string]any
+		require.NoError(t, conn.ReadJSON(&second))
+		require.Equal(t, "resp_1", second["previous_response_id"])
+		input, ok := second["input"].([]any)
+		require.True(t, ok)
+		require.Len(t, input, 1)
+		require.Equal(t, "tool_1", input[0].(map[string]any)["id"])
+		require.NoError(t, conn.WriteJSON(map[string]any{
+			"type": "response.completed",
+			"response": map[string]any{
+				"id":     "resp_2",
+				"object": "response",
+				"status": "completed",
+				"output": []any{},
+			},
+		}))
+	}))
+	defer server.Close()
+
+	executor := NewWebSocketExecutor(nil)
+	ctx := webSocketTestContext()
+	for _, body := range [][]byte{
+		[]byte(`{"model":"gpt-5","input":[{"id":"user_1","type":"message","role":"user"}]}`),
+		[]byte(`{"model":"gpt-5","previous_response_id":"resp_1","input":[{"id":"tool_1","type":"function_call_output","call_id":"call_1","output":"ok"}]}`),
+	} {
+		stream, err := executor.DoStream(ctx, &httpclient.Request{
+			Method: http.MethodPost,
+			URL:    "http" + strings.TrimPrefix(server.URL, "http") + "/v1/responses",
+			Headers: http.Header{
+				webSocketSessionHeader: []string{"matching-explicit-previous"},
+			},
+			Auth: &httpclient.AuthConfig{Type: httpclient.AuthTypeBearer, APIKey: "test-key"},
+			Body: body,
+		})
+		require.NoError(t, err)
+		require.True(t, stream.Next())
+		require.Equal(t, "response.completed", stream.Current().Type)
+		require.False(t, stream.Next())
+		require.NoError(t, stream.Err())
+		require.NoError(t, stream.Close())
+	}
+
+	require.Equal(t, int32(1), upgrades.Load())
+}
+
+func TestPrepareWebSocketPayloadChecksExplicitPreviousIDWithEmptyCachedInput(t *testing.T) {
+	pooled := &pooledWebSocketConn{lastResponseID: "resp_cached"}
+	lease := &webSocketLease{pooled: pooled, reused: true}
+	payload := map[string]any{
+		"model":                "gpt-5",
+		"previous_response_id": "resp_other",
+		"input":                []any{map[string]any{"type": "message", "role": "user", "content": "next"}},
+	}
+
+	err := prepareWebSocketPayloadForLease(payload, lease)
+	var reconnectErr *webSocketReconnectRequiredError
+	require.ErrorAs(t, err, &reconnectErr)
+}
+
 func TestRestorePayloadMapRestoresMutatedPayload(t *testing.T) {
 	originalInput := []any{
 		map[string]any{"id": "user_1", "type": "message", "role": "user"},
@@ -886,17 +1048,7 @@ func TestWebSocketExecutorSendsOnlyNewInputOnReusedSession(t *testing.T) {
 		require.True(t, ok)
 		require.Len(t, firstInput, 1)
 		require.NotContains(t, first, "previous_response_id")
-		require.NoError(t, conn.WriteJSON(map[string]any{
-			"type": "response.completed",
-			"response": map[string]any{
-				"id":         "resp_1",
-				"object":     "response",
-				"created_at": 1700000000,
-				"model":      "gpt-5",
-				"status":     "completed",
-				"output":     []any{},
-			},
-		}))
+		require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1700000000,"model":"gpt-5","status":"completed","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"run","arguments":"{}"}]}}`)))
 
 		var second map[string]any
 		require.NoError(t, conn.ReadJSON(&second))
@@ -923,7 +1075,7 @@ func TestWebSocketExecutorSendsOnlyNewInputOnReusedSession(t *testing.T) {
 
 	executor := NewWebSocketExecutor(nil)
 	firstBody := []byte(`{"model":"gpt-5","input":[{"id":"first","type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}]}`)
-	secondBody := []byte(`{"model":"gpt-5","input":[{"id":"first","type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},{"id":"second","type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
+	secondBody := []byte(`{"model":"gpt-5","input":[{"id":"first","type":"message","role":"user","content":[{"type":"input_text","text":"first"}]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"run","arguments":"{}"},{"id":"second","type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}]}`)
 
 	for _, body := range [][]byte{firstBody, secondBody} {
 		stream, err := executor.DoStream(webSocketTestContext(), &httpclient.Request{
@@ -1274,6 +1426,17 @@ func TestNormalizeWebSocketEventFlattensNestedError(t *testing.T) {
 	require.Equal(t, "bad_model", payload["code"])
 	require.Equal(t, "bad request", payload["message"])
 	require.Equal(t, "model", payload["param"])
+}
+
+func TestNormalizeWebSocketEventPreservesFlattenedFields(t *testing.T) {
+	raw := []byte(`{"type":"error","status":400,"code":"invalid_value","message":"flat message","error":{"type":"invalid_request_error","message":"nested message"}}`)
+
+	normalized := normalizeWebSocketEvent(raw)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(normalized, &payload))
+	require.Equal(t, "invalid_value", payload["code"])
+	require.Equal(t, "flat message", payload["message"])
 }
 
 func TestToWebSocketURL(t *testing.T) {

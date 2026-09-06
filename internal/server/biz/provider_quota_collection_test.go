@@ -2,8 +2,10 @@ package biz
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/enttest"
+	"github.com/looplj/axonhub/internal/ent/providerquotastatus"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/pkg/xcache"
 	"github.com/looplj/axonhub/internal/server/biz/provider_quota"
@@ -28,6 +31,36 @@ func (c *countingQuotaChecker) CheckQuota(context.Context, *ent.Channel) (provid
 
 func (c *countingQuotaChecker) SupportsChannel(*ent.Channel) bool {
 	return true
+}
+
+type failingQuotaChecker struct {
+	err error
+}
+
+func (c *failingQuotaChecker) CheckQuota(context.Context, *ent.Channel) (provider_quota.QuotaData, error) {
+	return provider_quota.QuotaData{}, c.err
+}
+
+func (c *failingQuotaChecker) SupportsChannel(*ent.Channel) bool {
+	return true
+}
+
+type countingQuotaResetter struct {
+	countingQuotaChecker
+
+	listCalls  atomic.Int32
+	resetCalls atomic.Int32
+	resets     provider_quota.ResetList
+}
+
+func (c *countingQuotaResetter) ListResets(context.Context, *ent.Channel) (provider_quota.ResetList, error) {
+	c.listCalls.Add(1)
+	return c.resets, nil
+}
+
+func (c *countingQuotaResetter) Reset(context.Context, *ent.Channel) error {
+	c.resetCalls.Add(1)
+	return nil
 }
 
 func setupProviderQuotaCollectionService(t *testing.T) (*ProviderQuotaService, *SystemService, context.Context, *ent.Client) {
@@ -67,6 +100,88 @@ func createProviderQuotaCollectionChannel(
 		Save(ctx)
 	require.NoError(t, err)
 	return result
+}
+
+func TestProviderQuotaService_CheckChannelQuota_PersistsSanitizedErrorForInvalidCommandCodeCookie(t *testing.T) {
+	service, _, ctx, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+
+	channelEntity, err := client.Channel.Create().
+		SetName("Command Code").
+		SetType(channel.TypeCommandcode).
+		SetStatus(channel.StatusEnabled).
+		SetCredentials(objects.ChannelCredentials{APIKey: "test-key"}).
+		SetSettings(&objects.ChannelSettings{
+			ProviderQuota: &objects.ChannelProviderQuotaSettings{
+				CommandCode: &objects.CommandCodeQuotaSettings{
+					AuthCookie: "commandcode_prod_.session_token=expired",
+				},
+			},
+		}).
+		SetSupportedModels([]string{"test-model"}).
+		SetDefaultTestModel("test-model").
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.ProviderQuotaStatus.Create().
+		SetChannelID(channelEntity.ID).
+		SetProviderType(providerquotastatus.ProviderTypeCommandcode).
+		SetStatus(providerquotastatus.StatusAvailable).
+		SetReady(true).
+		SetQuotaData(map[string]any{"old": "quota"}).
+		SetNextCheckAt(time.Now().Add(-time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	service.checkers["commandcode"] = &failingQuotaChecker{err: provider_quota.ErrInvalidCredentials}
+
+	service.mu.Lock()
+	service.runQuotaCheck(ctx, true)
+	service.mu.Unlock()
+
+	status, err := client.ProviderQuotaStatus.Query().
+		Where(providerquotastatus.ChannelIDEQ(channelEntity.ID)).
+		Only(ctx)
+	require.NoError(t, err)
+	require.Equal(t, providerquotastatus.StatusUnknown, status.Status)
+	require.False(t, status.Ready)
+	require.Equal(t, "check_failed", status.QuotaData["error_code"])
+	require.NotContains(t, status.QuotaData, "error")
+	require.NotContains(t, status.QuotaData, "old")
+	cached, ok := service.quotaCache.Load(channelEntity.ID)
+	require.True(t, ok)
+	cachedStatus, ok := cached.(*QuotaChannelStatus)
+	require.True(t, ok)
+	require.Equal(t, providerquotastatus.StatusUnknown, cachedStatus.Status)
+	require.False(t, cachedStatus.Ready)
+	require.Empty(t, cachedStatus.Limits)
+}
+
+func TestProviderQuotaService_CheckChannelQuota_RemovesStaleStatusWithoutCommandCodeCookie(t *testing.T) {
+	service, _, ctx, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+
+	channelEntity := createProviderQuotaCollectionChannel(t, ctx, client, "Command Code", channel.TypeCommandcode)
+	_, err := client.ProviderQuotaStatus.Create().
+		SetChannelID(channelEntity.ID).
+		SetProviderType(providerquotastatus.ProviderTypeCommandcode).
+		SetStatus(providerquotastatus.StatusAvailable).
+		SetReady(true).
+		SetQuotaData(map[string]any{"old": "quota"}).
+		SetNextCheckAt(time.Now().Add(-time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	service.mu.Lock()
+	service.checkChannelQuota(ctx, quotaCheckGroup{channels: []*ent.Channel{channelEntity}}, time.Now())
+	service.mu.Unlock()
+
+	_, err = client.ProviderQuotaStatus.Query().
+		Where(providerquotastatus.ChannelIDEQ(channelEntity.ID)).
+		Only(ctx)
+	require.True(t, ent.IsNotFound(err))
+	_, ok := service.quotaCache.Load(channelEntity.ID)
+	require.False(t, ok)
 }
 
 func TestProviderQuotaService_RunQuotaCheck_CollectionDisabledGlobally(t *testing.T) {
@@ -158,7 +273,9 @@ func TestProviderQuotaService_ResetChannelQuotaNow_CollectionDisabledForCodex(t 
 	service, systemService, ctx, client := setupProviderQuotaCollectionService(t)
 	defer client.Close()
 
-	codexChecker := &countingQuotaChecker{providerType: "codex"}
+	codexChecker := &countingQuotaResetter{
+		countingQuotaChecker: countingQuotaChecker{providerType: "codex"},
+	}
 	service.checkers["codex"] = codexChecker
 	channelEntity := createProviderQuotaCollectionChannel(t, ctx, client, "Codex", channel.TypeCodex)
 	require.NoError(t, client.Channel.UpdateOne(channelEntity).
@@ -172,4 +289,55 @@ func TestProviderQuotaService_ResetChannelQuotaNow_CollectionDisabledForCodex(t 
 
 	require.ErrorContains(t, err, "provider quota collection is disabled for codex")
 	require.Zero(t, codexChecker.calls.Load())
+	require.Zero(t, codexChecker.resetCalls.Load())
+}
+
+func TestProviderQuotaService_ListResets_ReturnsUnsupportedForCheckerWithoutResetter(t *testing.T) {
+	service, _, ctx, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+
+	service.checkers["minimax"] = &countingQuotaChecker{providerType: "minimax"}
+	channelEntity := createProviderQuotaCollectionChannel(t, ctx, client, "MiniMax", channel.TypeMinimax)
+
+	resets, err := service.ListResets(ctx, channelEntity.ID)
+
+	require.NoError(t, err)
+	require.False(t, resets.Supported)
+	require.Empty(t, resets.Resets)
+}
+
+func TestProviderQuotaService_ResetChannelQuotaNow_ReturnsUnsupportedForCheckerWithoutResetter(t *testing.T) {
+	service, _, ctx, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+
+	service.checkers["minimax"] = &countingQuotaChecker{providerType: "minimax"}
+	channelEntity := createProviderQuotaCollectionChannel(t, ctx, client, "MiniMax", channel.TypeMinimax)
+
+	err := service.ResetChannelQuotaNow(ctx, channelEntity.ID)
+
+	require.Error(t, err)
+	require.True(t, errors.Is(err, provider_quota.ErrResetUnsupported))
+}
+
+func TestProviderQuotaService_ListResets_UsesOptionalResetter(t *testing.T) {
+	service, _, ctx, client := setupProviderQuotaCollectionService(t)
+	defer client.Close()
+
+	resetter := &countingQuotaResetter{
+		countingQuotaChecker: countingQuotaChecker{providerType: "minimax"},
+		resets: provider_quota.ResetList{
+			Resets: []provider_quota.Reset{
+				{ID: "reset-1", Status: "available"},
+			},
+		},
+	}
+	service.checkers["minimax"] = resetter
+	channelEntity := createProviderQuotaCollectionChannel(t, ctx, client, "MiniMax", channel.TypeMinimax)
+
+	resets, err := service.ListResets(ctx, channelEntity.ID)
+
+	require.NoError(t, err)
+	require.True(t, resets.Supported)
+	require.Len(t, resets.Resets, 1)
+	require.EqualValues(t, 1, resetter.listCalls.Load())
 }

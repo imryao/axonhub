@@ -301,6 +301,9 @@ export interface CleanupOptionInput {
 export interface TriggerGcCleanupInput {
   requestsCleanupDays: number;
   usageLogsCleanupDays: number;
+  requestBodiesCleanupDays?: number;
+  responseBodiesCleanupDays?: number;
+  responseChunksCleanupDays?: number;
 }
 
 export interface GcCleanupPreviewItem {
@@ -552,6 +555,19 @@ export function usePreviewGcCleanup() {
       return data.previewGcCleanup;
     },
   });
+}
+
+export async function previewGcCleanup(
+  input: TriggerGcCleanupInput,
+  signal?: AbortSignal
+): Promise<GcCleanupPreviewItem[]> {
+  const data = await graphqlRequest<{ previewGcCleanup: GcCleanupPreviewItem[] }>(
+    PREVIEW_GC_CLEANUP_QUERY,
+    { input },
+    undefined,
+    { signal }
+  );
+  return data.previewGcCleanup;
 }
 
 export function useRetryPolicy() {
@@ -819,6 +835,7 @@ const MODEL_SETTINGS_QUERY = `
       defaultModelAPIIncludeAll
       autoReasoningEffort
       modelBlacklistRegex
+      hideUnroutableModelsInList
       developerSettings {
         developer
         associations {
@@ -968,6 +985,7 @@ export interface ModelSettings {
   defaultModelAPIIncludeAll: boolean;
   autoReasoningEffort: boolean;
   modelBlacklistRegex: string;
+  hideUnroutableModelsInList: boolean;
   developerSettings: DeveloperModelSettings[];
 }
 
@@ -977,6 +995,7 @@ export interface UpdateModelSettingsInput {
   defaultModelAPIIncludeAll?: boolean;
   autoReasoningEffort?: boolean;
   modelBlacklistRegex?: string;
+  hideUnroutableModelsInList?: boolean;
   developerSettings?: DeveloperModelSettings[];
 }
 
@@ -1674,11 +1693,69 @@ export function useUpdatePassThroughSettings() {
   });
 }
 
+const USAGE_COST_INJECTION_SETTINGS_QUERY = `
+  query UsageCostInjectionSettings {
+    usageCostInjectionSettings {
+      enabled
+    }
+  }
+`;
+
+const UPDATE_USAGE_COST_INJECTION_SETTINGS_MUTATION = `
+  mutation UpdateUsageCostInjectionSettings($input: UpdateUsageCostInjectionSettingsInput!) {
+    updateUsageCostInjectionSettings(input: $input)
+  }
+`;
+
+export interface UsageCostInjectionSettings {
+  enabled: boolean;
+}
+
+export interface UpdateUsageCostInjectionSettingsInput {
+  enabled: boolean;
+}
+
+export function useUsageCostInjectionSettings() {
+  const { handleError } = useErrorHandler();
+
+  return useQuery({
+    queryKey: ['usageCostInjectionSettings'],
+    queryFn: async () => {
+      try {
+        const data = await graphqlRequest<{ usageCostInjectionSettings: UsageCostInjectionSettings }>(USAGE_COST_INJECTION_SETTINGS_QUERY);
+        return data.usageCostInjectionSettings;
+      } catch (error) {
+        handleError(error, i18n.t('common.errors.internalServerError'));
+        throw error;
+      }
+    },
+  });
+}
+
+export function useUpdateUsageCostInjectionSettings() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (input: UpdateUsageCostInjectionSettingsInput) => {
+      const data = await graphqlRequest<{ updateUsageCostInjectionSettings: boolean }>(UPDATE_USAGE_COST_INJECTION_SETTINGS_MUTATION, { input });
+      return data.updateUsageCostInjectionSettings;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['usageCostInjectionSettings'] });
+      toast.success(i18n.t('common.success.systemUpdated'));
+    },
+    onError: () => {
+      toast.error(i18n.t('common.errors.systemUpdateFailed'));
+    },
+  });
+}
+
 const QUOTA_ENFORCEMENT_SETTINGS_QUERY = `
   query QuotaEnforcementSettings {
     quotaEnforcementSettings {
       enabled
       mode
+      allowedChannelIDs
     }
   }
 `;
@@ -1694,11 +1771,13 @@ export type QuotaEnforcementMode = 'EXHAUSTED_ONLY' | 'DE_PRIORITIZE';
 export interface QuotaEnforcementSettings {
   enabled: boolean;
   mode: QuotaEnforcementMode;
+  allowedChannelIDs: string[];
 }
 
 export interface UpdateQuotaEnforcementSettingsInput {
   enabled?: boolean;
   mode?: QuotaEnforcementMode;
+  allowedChannelIDs?: string[];
 }
 
 export function useQuotaEnforcementSettings() {
@@ -1806,6 +1885,69 @@ export function useUpdateProviderQuotaCollectionSettings() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['providerQuotaCollectionSettings'] });
       queryClient.invalidateQueries({ queryKey: ['provider-quotas'] });
+      toast.success(i18n.t('common.success.systemUpdated'));
+    },
+    onError: () => {
+      toast.error(i18n.t('common.errors.systemUpdateFailed'));
+    },
+  });
+}
+
+const CATALOG_SETTINGS_QUERY = `
+  query CatalogSettings {
+    catalogSettings {
+      upstreamURL
+      refreshSeconds
+    }
+  }
+`;
+
+const UPDATE_CATALOG_SETTINGS_MUTATION = `
+  mutation UpdateCatalogSettings($input: UpdateCatalogSettingsInput!) {
+    updateCatalogSettings(input: $input)
+  }
+`;
+
+export interface CatalogSettings {
+  upstreamURL: string;
+  refreshSeconds: number;
+}
+
+export interface UpdateCatalogSettingsInput {
+  upstreamURL?: string;
+  refreshSeconds?: number;
+}
+
+export function useCatalogSettings() {
+  const { handleError } = useErrorHandler();
+  const { hasSystemScope } = usePermissions();
+
+  return useQuery({
+    queryKey: ['catalogSettings'],
+    enabled: hasSystemScope('read_settings'),
+    queryFn: async () => {
+      try {
+        const data = await graphqlRequest<{ catalogSettings: CatalogSettings }>(CATALOG_SETTINGS_QUERY);
+        return data.catalogSettings;
+      } catch (error) {
+        handleError(error, i18n.t('common.errors.internalServerError'));
+        throw error;
+      }
+    },
+  });
+}
+
+export function useUpdateCatalogSettings() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (input: UpdateCatalogSettingsInput) => {
+      const data = await graphqlRequest<{ updateCatalogSettings: boolean }>(UPDATE_CATALOG_SETTINGS_MUTATION, { input });
+      return data.updateCatalogSettings;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['catalogSettings'] });
+      queryClient.invalidateQueries({ queryKey: ['providers-catalog'] });
       toast.success(i18n.t('common.success.systemUpdated'));
     },
     onError: () => {

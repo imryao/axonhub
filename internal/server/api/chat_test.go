@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/looplj/axonhub/internal/authz"
+	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/enttest"
 	"github.com/looplj/axonhub/internal/server/biz"
@@ -184,6 +187,10 @@ func (w *failingResponseWriter) Write(_ []byte) (int, error) {
 	return 0, w.err
 }
 
+func (w *failingResponseWriter) WriteString(data string) (int, error) {
+	return w.Write([]byte(data))
+}
+
 type heartbeatFailingResponseWriter struct {
 	gin.ResponseWriter
 
@@ -204,6 +211,78 @@ func (w *heartbeatFailingResponseWriter) WriteString(data string) (int, error) {
 	return w.Write([]byte(data))
 }
 
+type flushFailingResponseWriter struct {
+	*httptest.ResponseRecorder
+
+	err error
+}
+
+func (w *flushFailingResponseWriter) FlushError() error {
+	return w.err
+}
+
+type deadlineTrackingResponseWriter struct {
+	gin.ResponseWriter
+
+	deadlines      []time.Time
+	operations     []string
+	deadlineActive bool
+}
+
+func (w *deadlineTrackingResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	w.deadlineActive = !deadline.IsZero()
+	if w.deadlineActive {
+		w.operations = append(w.operations, "deadline:set")
+	} else {
+		w.operations = append(w.operations, "deadline:clear")
+	}
+
+	return nil
+}
+
+func (w *deadlineTrackingResponseWriter) Write(data []byte) (int, error) {
+	w.operations = append(w.operations, fmt.Sprintf("write:%t", w.deadlineActive))
+
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *deadlineTrackingResponseWriter) WriteString(data string) (int, error) {
+	w.operations = append(w.operations, fmt.Sprintf("write:%t", w.deadlineActive))
+
+	return w.ResponseWriter.WriteString(data)
+}
+
+func (w *deadlineTrackingResponseWriter) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *deadlineTrackingResponseWriter) FlushError() error {
+	w.operations = append(w.operations, fmt.Sprintf("flush:%t", w.deadlineActive))
+	w.ResponseWriter.Flush()
+
+	return nil
+}
+
+func activeWriteDeadlineCount(deadlines []time.Time) int {
+	count := 0
+	for _, deadline := range deadlines {
+		if !deadline.IsZero() {
+			count++
+		}
+	}
+
+	return count
+}
+
+func requireProtectedSSEWrites(t *testing.T, writer *deadlineTrackingResponseWriter) {
+	t.Helper()
+	require.NotEmpty(t, writer.operations)
+	require.NotContains(t, writer.operations, "write:false")
+	require.NotContains(t, writer.operations, "flush:false")
+	require.False(t, writer.deadlineActive)
+}
+
 func TestWriteSSEStream_Success(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -222,9 +301,43 @@ func TestWriteSSEStream_Success(t *testing.T) {
 	assert.Contains(t, body, `[DONE]`)
 }
 
+func TestWriteSSEStream_WriteErrorStopsConsuming(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Writer = &failingResponseWriter{
+		ResponseWriter: c.Writer,
+		err:            errors.New("write failed"),
+	}
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	stream := &trackingStream{items: []*httpclient.StreamEvent{
+		{Data: []byte(`{"id":"1"}`)},
+		{Data: []byte(`[DONE]`)},
+	}}
+
+	WriteSSEStream(c, stream)
+
+	require.Equal(t, 1, stream.idx)
+}
+
+func TestWriteSSEStream_FlushErrorStopsBeforeConsuming(t *testing.T) {
+	w := &flushFailingResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		err:              errors.New("flush failed"),
+	}
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	stream := &trackingStream{items: []*httpclient.StreamEvent{{Data: []byte(`[DONE]`)}}}
+
+	WriteSSEStream(c, stream)
+
+	require.Zero(t, stream.idx)
+}
+
 func TestWriteSSEStream_OpenAIHeartbeat(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
+	deadlineWriter := &deadlineTrackingResponseWriter{ResponseWriter: c.Writer}
+	c.Writer = deadlineWriter
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 
 	stream := &delayedStream{
@@ -240,6 +353,10 @@ func TestWriteSSEStream_OpenAIHeartbeat(t *testing.T) {
 	body := w.Body.String()
 	require.Contains(t, body, ": keep-alive\n\n")
 	require.Contains(t, body, "data: [DONE]\n\n")
+	activeDeadlines := activeWriteDeadlineCount(deadlineWriter.deadlines)
+	require.GreaterOrEqual(t, activeDeadlines, 3)
+	require.GreaterOrEqual(t, len(deadlineWriter.deadlines)-activeDeadlines, activeDeadlines)
+	requireProtectedSSEWrites(t, deadlineWriter)
 }
 
 func TestWriteSSEStream_AnthropicHeartbeat(t *testing.T) {
@@ -392,6 +509,44 @@ func TestWriteSSEStream_CanceledContextStillDrainsBufferedEvents(t *testing.T) {
 	assert.Contains(t, body, `{"id":"1","choices":[{"delta":{"content":"Hi"}}]}`)
 	assert.Contains(t, body, `[DONE]`)
 	assert.NotContains(t, body, `"error"`)
+}
+
+func TestWriteSSEStream_DeadlineReportsErrorAtDrainLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		keepAlive SSEKeepAliveConfig
+	}{
+		{name: "without heartbeat"},
+		{
+			name: "with heartbeat",
+			keepAlive: SSEKeepAliveConfig{
+				Enabled:  true,
+				Interval: time.Hour,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			ctx, cancel := context.WithTimeout(context.Background(), 0)
+			defer cancel()
+			c.Request = httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+
+			events := make([]*httpclient.StreamEvent, maxStreamEventsAfterCancel+1)
+			for i := range events {
+				events[i] = &httpclient.StreamEvent{Data: []byte(`{"id":"draining"}`)}
+			}
+			stream := &trackingStream{items: events}
+
+			writeSSEStream(c, stream, FormatStreamError, tt.keepAlive, sseHeartbeatOpenAI)
+
+			parsed := parseSSEErrorEvent(t, w.Body.String())
+			errorField := parsed["error"].(map[string]any)
+			assert.Contains(t, errorField["message"], context.DeadlineExceeded.Error())
+		})
+	}
 }
 
 func TestWriteSSEStream_ErrorFormatsAsJSON(t *testing.T) {
@@ -825,6 +980,26 @@ func TestWriteSSEStream_IncompleteStreamReportsErrorWithHeartbeat(t *testing.T) 
 	require.Contains(t, body, orchestrator.ErrStreamIncomplete.Error())
 }
 
+// Gemini generateContent streams terminate with candidates[].finishReason and
+// never send [DONE]. Treating that as incomplete appends a trailing error that
+// Gemini SDKs surface as StreamException.
+func TestWriteSSEStream_GeminiFinishReasonIsNotIncomplete(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+	events := []*httpclient.StreamEvent{
+		{Data: []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"hello"}]}}]}`)},
+		{Data: []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"world!"}]},"finishReason":"STOP"}]}`)},
+	}
+
+	WriteSSEStream(c, streams.SliceStream(events))
+
+	body := w.Body.String()
+	require.NotContains(t, body, "event:error")
+	require.NotContains(t, body, orchestrator.ErrStreamIncomplete.Error())
+}
+
 // A stream that carries finish_reason but no [DONE] is already complete; clients
 // commonly close right after that chunk, so it must not be flagged as incomplete.
 func TestWriteSSEStream_FinishReasonWithoutDoneIsNotIncomplete(t *testing.T) {
@@ -876,4 +1051,229 @@ func TestWriteSSEStream_MessageStopIsNotIncomplete(t *testing.T) {
 
 	body := w.Body.String()
 	require.NotContains(t, body, "event:error")
+}
+
+// parseSSEErrorEvent extracts the JSON payload of the first "error" SSE event.
+func parseSSEErrorEvent(t *testing.T, body string) map[string]any {
+	t.Helper()
+
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "event:error") {
+			continue
+		}
+
+		require.Less(t, i+1, len(lines), "error event should have a data line")
+
+		var parsed map[string]any
+
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(lines[i+1], "data:")), &parsed))
+
+		return parsed
+	}
+
+	require.FailNow(t, "no error event found", body)
+
+	return nil
+}
+
+func TestFormatStreamError_FallsBackToContextRequestID(t *testing.T) {
+	ctx := contexts.WithRequestID(context.Background(), "req_gateway_1")
+
+	data, err := json.Marshal(FormatStreamError(ctx, errors.New("boom")))
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(data, &parsed))
+	assert.Equal(t, "req_gateway_1", parsed["request_id"])
+
+	// An upstream request id still wins over the gateway one.
+	respErr := &llm.ResponseError{Detail: llm.ErrorDetail{Message: "m", RequestID: "req_upstream"}}
+
+	data, err = json.Marshal(FormatStreamError(ctx, respErr))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &parsed))
+	assert.Equal(t, "req_upstream", parsed["request_id"])
+
+	// No id anywhere keeps the field empty instead of failing.
+	data, err = json.Marshal(FormatStreamError(context.Background(), errors.New("boom")))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &parsed))
+	assert.Equal(t, "", parsed["request_id"])
+}
+
+// An upstream that drops the connection after content was delivered must surface as a
+// classified upstream error (stable code, 502 semantics), not as a bare "unexpected EOF".
+func TestWriteSSEStream_TransportErrorIsClassified(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil).
+		WithContext(contexts.WithRequestID(context.Background(), "req_gateway_2"))
+
+	stream := &errorAfterStream{
+		items: []*httpclient.StreamEvent{
+			{Data: []byte(`{"id":"1","choices":[{"delta":{"content":"He"}}]}`)},
+		},
+		err: fmt.Errorf("read body: %w", io.ErrUnexpectedEOF),
+	}
+
+	WriteSSEStream(c, stream)
+
+	parsed := parseSSEErrorEvent(t, w.Body.String())
+	errorField := parsed["error"].(map[string]any)
+	assert.Equal(t, orchestrator.ErrTypeUpstreamError, errorField["type"])
+	assert.Equal(t, orchestrator.ErrCodeUpstreamStreamInterrupted, errorField["code"])
+	assert.Contains(t, errorField["message"], "unexpected EOF")
+	assert.Equal(t, "req_gateway_2", parsed["request_id"])
+}
+
+func TestWriteSSEStream_ServerDeadlineReportsErrorToClient(t *testing.T) {
+	tests := []struct {
+		name      string
+		streamErr error
+	}{
+		{name: "transport reports canceled", streamErr: context.Canceled},
+		{name: "transport reports no error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			deadlineWriter := &deadlineTrackingResponseWriter{ResponseWriter: c.Writer}
+			c.Writer = deadlineWriter
+			ctx, cancel := context.WithTimeout(context.Background(), 0)
+			defer cancel()
+			require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+			c.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+
+			WriteSSEStream(c, &errorAfterStream{err: tt.streamErr})
+
+			parsed := parseSSEErrorEvent(t, w.Body.String())
+			errorField := parsed["error"].(map[string]any)
+			assert.Contains(t, errorField["message"], context.DeadlineExceeded.Error())
+			activeDeadlines := activeWriteDeadlineCount(deadlineWriter.deadlines)
+			require.Equal(t, 2, activeDeadlines)
+			require.GreaterOrEqual(t, len(deadlineWriter.deadlines)-activeDeadlines, activeDeadlines)
+			requireProtectedSSEWrites(t, deadlineWriter)
+		})
+	}
+}
+
+func TestWriteSSEStream_SubstantiveErrorWinsDeadlineRace(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	ctx, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	streamErr := fmt.Errorf("read body: %w", io.ErrUnexpectedEOF)
+
+	WriteSSEStream(c, &errorAfterStream{err: streamErr})
+
+	parsed := parseSSEErrorEvent(t, w.Body.String())
+	errorField := parsed["error"].(map[string]any)
+	assert.Equal(t, orchestrator.ErrCodeUpstreamStreamInterrupted, errorField["code"])
+	assert.Contains(t, errorField["message"], io.ErrUnexpectedEOF.Error())
+}
+
+func TestWriteSSEStream_TerminalEventWinsDeadlineRace(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	ctx, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	stream := &errorAfterStream{
+		items: []*httpclient.StreamEvent{{Data: []byte("[DONE]")}},
+		err:   io.ErrUnexpectedEOF,
+	}
+
+	WriteSSEStream(c, stream)
+
+	require.Contains(t, w.Body.String(), "[DONE]")
+	require.NotContains(t, w.Body.String(), "event:error")
+}
+
+func TestWriteSSEStream_RefreshesWriteDeadline(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	deadlineWriter := &deadlineTrackingResponseWriter{ResponseWriter: c.Writer}
+	c.Writer = deadlineWriter
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+	stream := streams.SliceStream([]*httpclient.StreamEvent{{Data: []byte("[DONE]")}})
+
+	WriteSSEStream(c, stream)
+
+	require.NotEmpty(t, deadlineWriter.deadlines)
+	activeDeadlines := activeWriteDeadlineCount(deadlineWriter.deadlines)
+	require.Equal(t, 2, activeDeadlines)
+	require.GreaterOrEqual(t, len(deadlineWriter.deadlines)-activeDeadlines, activeDeadlines)
+	requireProtectedSSEWrites(t, deadlineWriter)
+	for _, deadline := range deadlineWriter.deadlines {
+		if !deadline.IsZero() {
+			assert.WithinDuration(t, time.Now().Add(sseWriteTimeout), deadline, time.Second)
+		}
+	}
+}
+
+func TestWriteSSEStream_IncompleteStreamErrorIsClassified(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+	events := []*httpclient.StreamEvent{
+		{Data: []byte(`{"id":"1","choices":[{"delta":{"content":"Hi"}}]}`)},
+	}
+
+	WriteSSEStream(c, streams.SliceStream(events))
+
+	parsed := parseSSEErrorEvent(t, w.Body.String())
+	errorField := parsed["error"].(map[string]any)
+	assert.Equal(t, orchestrator.ErrCodeUpstreamStreamInterrupted, errorField["code"])
+	assert.Contains(t, errorField["message"], orchestrator.ErrStreamIncomplete.Error())
+}
+
+// Hidden/custom policies rewrite the message but must keep the classification so
+// clients can still tell an interrupted stream from other upstream failures.
+func TestUpstreamErrorStream_HiddenModeKeepsTransportErrorCode(t *testing.T) {
+	ctx, systemService := setupUpstreamErrorPolicyTest(t, biz.UpstreamErrorPolicy{
+		Mode: biz.UpstreamErrorModeHidden,
+	})
+
+	inner := &errorAfterStream{err: io.ErrUnexpectedEOF}
+	stream := newUpstreamErrorStream(ctx, inner, systemService)
+	require.False(t, stream.Next())
+
+	err := stream.Err()
+
+	respErr := &llm.ResponseError{}
+	require.True(t, errors.As(err, &respErr))
+	assert.Equal(t, http.StatusBadGateway, respErr.StatusCode)
+	assert.Equal(t, orchestrator.ErrTypeUpstreamError, respErr.Detail.Type)
+	assert.Equal(t, orchestrator.ErrCodeUpstreamStreamInterrupted, respErr.Detail.Code)
+	assert.Equal(t, biz.DefaultUpstreamErrorMessage, respErr.Detail.Message)
+	assert.NotContains(t, respErr.Detail.Message, "unexpected EOF")
+}
+
+func TestUpstreamErrorStream_PassthroughClassifiesTransportError(t *testing.T) {
+	ctx, systemService := setupUpstreamErrorPolicyTest(t, biz.UpstreamErrorPolicy{
+		Mode: biz.UpstreamErrorModePassthrough,
+	})
+
+	inner := &errorAfterStream{err: llm.ErrStreamIncomplete}
+	stream := newUpstreamErrorStream(ctx, inner, systemService)
+	require.False(t, stream.Next())
+
+	err := stream.Err()
+	require.True(t, errors.Is(err, llm.ErrStreamIncomplete))
+
+	respErr := &llm.ResponseError{}
+	require.True(t, errors.As(err, &respErr))
+	assert.Equal(t, orchestrator.ErrCodeUpstreamStreamInterrupted, respErr.Detail.Code)
+	assert.Contains(t, respErr.Detail.Message, llm.ErrStreamIncomplete.Error())
+
+	// Non-transport errors are passed through untouched.
+	plain := errors.New("boom")
+	stream = newUpstreamErrorStream(ctx, &errorAfterStream{err: plain}, systemService)
+	require.False(t, stream.Next())
+	assert.Equal(t, plain, stream.Err())
 }

@@ -8,8 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/enttest"
+	"github.com/looplj/axonhub/internal/ent/request"
 	"github.com/looplj/axonhub/internal/pkg/xcache"
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/llm"
@@ -273,6 +275,69 @@ func TestIsTerminalStreamEvent_AudioDoneEvents(t *testing.T) {
 	require.False(t, IsTerminalStreamEvent(&httpclient.StreamEvent{Type: "audio/mpeg"}))
 }
 
+// TestInboundPersistentStream_Close_IncompleteStillPersistsChunks ensures a clean
+// upstream EOF without terminal/completion still saves buffered chunks when
+// store_chunks is on — without marking the request completed.
+func TestInboundPersistentStream_Close_IncompleteStillPersistsChunks(t *testing.T) {
+	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
+	defer client.Close()
+
+	ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
+	project := createTestProject(t, ctx, client)
+	ch := createTestChannel(t, ctx, client)
+	_, requestService, systemService, _ := setupTestServices(t, client)
+	require.NoError(t, systemService.SetStoragePolicy(ctx, &biz.StoragePolicy{
+		StoreChunks:       true,
+		StoreRequestBody:  true,
+		StoreResponseBody: true,
+	}))
+
+	req, err := client.Request.Create().
+		SetProjectID(project.ID).
+		SetChannelID(ch.ID).
+		SetModelID("gpt-4").
+		SetStatus(request.StatusProcessing).
+		SetRequestBody([]byte(`{"stream":true}`)).
+		SetStream(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	partial := &httpclient.StreamEvent{
+		Type: "chunk",
+		Data: []byte(`{"id":"chatcmpl-partial","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`),
+	}
+	mockStream := &mockStream{events: []*httpclient.StreamEvent{partial}}
+	mockTransformer := &mockInboundTransformer{
+		aggregateErr: errors.New("incomplete aggregation"),
+	}
+	state := &PersistenceState{}
+
+	stream := NewInboundPersistentStream(
+		ctx,
+		mockStream,
+		req,
+		&ent.RequestExecution{ID: 1},
+		requestService,
+		mockTransformer,
+		nil,
+		state,
+	)
+	require.True(t, stream.Next())
+	_ = stream.Current()
+	require.NoError(t, stream.Close())
+
+	require.False(t, state.StreamCompleted)
+
+	dbReq, err := client.Request.Get(ctx, req.ID)
+	require.NoError(t, err)
+	require.Equal(t, request.StatusFailed, dbReq.Status)
+	require.NotEmpty(t, dbReq.ResponseChunks, "failed request should keep response_chunks in DB")
+
+	chunks, err := requestService.LoadResponseChunks(ctx, dbReq)
+	require.NoError(t, err)
+	require.Len(t, chunks, 1)
+}
+
 func TestIsTerminalStreamEvent_SemanticCompletionInData(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -297,6 +362,26 @@ func TestIsTerminalStreamEvent_SemanticCompletionInData(t *testing.T) {
 		{
 			name:  "chat completion without finish reason",
 			event: &httpclient.StreamEvent{Data: []byte(`{"choices":[{"index":0,"finish_reason":null}]}`)},
+			want:  false,
+		},
+		{
+			name:  "gemini finish reason stop",
+			event: &httpclient.StreamEvent{Data: []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"world!"}]},"finishReason":"STOP"}]}`)},
+			want:  true,
+		},
+		{
+			name:  "gemini finish reason max tokens",
+			event: &httpclient.StreamEvent{Data: []byte(`{"candidates":[{"index":0,"finishReason":"MAX_TOKENS"}]}`)},
+			want:  true,
+		},
+		{
+			name:  "gemini chunk without finish reason",
+			event: &httpclient.StreamEvent{Data: []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"hello"}]}}]}`)},
+			want:  false,
+		},
+		{
+			name:  "gemini empty finish reason",
+			event: &httpclient.StreamEvent{Data: []byte(`{"candidates":[{"index":0,"finishReason":""}]}`)},
 			want:  false,
 		},
 		{

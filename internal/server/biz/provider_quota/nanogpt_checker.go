@@ -116,12 +116,13 @@ func (c *NanoGPTQuotaChecker) parseResponse(body []byte) (QuotaData, error) {
 
 	limits := buildNanoGPTLimitStatuses(response.DailyImages, response.DailyInputTokens, response.WeeklyInputTokens)
 
-	// Check for warning state: any window with percentUsed >= WarningThresholdRatio
-	if normalizedStatus == "available" {
+	// Escalate to the worst per-limit status (available < warning < exhausted).
+	// Only escalate from available/warning bases so that state-driven statuses
+	// (inactive→exhausted, unrecognized→unknown) are never overridden.
+	if normalizedStatus == "available" || normalizedStatus == "warning" {
 		for i := range limits {
-			if limits[i].Status == "warning" || limits[i].Status == "exhausted" {
-				normalizedStatus = "warning"
-				break
+			if quotaStatusRank(limits[i].Status) > quotaStatusRank(normalizedStatus) {
+				normalizedStatus = limits[i].Status
 			}
 		}
 	}
@@ -228,12 +229,14 @@ func buildNanoGPTQuotaURL(baseURL string) string {
 
 func buildNanoGPTLimitStatuses(imageWindow, dailyTokenWindow, weeklyTokenWindow *NanoGPTQuotaWindow) []QuotaLimitStatus {
 	typed := []struct {
-		window   *NanoGPTQuotaWindow
-		limitType QuotaLimitType
+		window      *NanoGPTQuotaWindow
+		limitType   QuotaLimitType
+		windowLabel string
+		windowLen   time.Duration
 	}{
-		{window: imageWindow, limitType: QuotaLimitTypeImage},
-		{window: dailyTokenWindow, limitType: QuotaLimitTypeToken},
-		{window: weeklyTokenWindow, limitType: QuotaLimitTypeToken},
+		{window: imageWindow, limitType: QuotaLimitTypeImage, windowLabel: QuotaWindowDaily, windowLen: 24 * time.Hour},
+		{window: dailyTokenWindow, limitType: QuotaLimitTypeToken, windowLabel: QuotaWindowDaily, windowLen: 24 * time.Hour},
+		{window: weeklyTokenWindow, limitType: QuotaLimitTypeToken, windowLabel: QuotaWindowWeekly, windowLen: 7 * 24 * time.Hour},
 	}
 
 	var limits []QuotaLimitStatus
@@ -271,7 +274,7 @@ func buildNanoGPTLimitStatuses(imageWindow, dailyTokenWindow, weeklyTokenWindow 
 			UsageRatio:  usageRatio,
 			Ready:       IsReadyStatus(status),
 			NextResetAt: resetAt,
-		})
+		}.WithWindow(w.windowLabel, w.windowLen))
 	}
 
 	return limits

@@ -65,14 +65,6 @@ type Config struct {
 	// Use ReasoningFieldContent (default) for DeepSeek/Mimo/Gemini, ReasoningFieldReasoning for NanoGPT/OpenRouter,
 	// or ReasoningFieldNone to strip all reasoning fields.
 	ReasoningField ReasoningField `json:"reasoning_field,omitempty"`
-
-	// ReasoningEffortMapping maps inbound reasoning_effort values to outbound ones for
-	// non-standard OpenAI-compatible providers. The first entry whose From matches the
-	// effort value wins; values not in the list pass through unchanged.
-	// e.g. [{"from":"xhigh","to":"max"}] converts Anthropic's internal "xhigh" (mapped
-	// from "max") back to "max" for providers that only recognize "max". Consumed in
-	// TransformRequest.
-	ReasoningEffortMapping []llm.ReasoningEffortMapping `json:"reasoning_effort_mapping,omitempty"`
 }
 
 // OutboundTransformer implements transformer.Outbound for OpenAI format.
@@ -163,6 +155,8 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		return t.transformEmbeddingRequest(ctx, llmReq)
 	case llm.RequestTypeModeration:
 		return t.transformModerationRequest(ctx, llmReq)
+	case llm.RequestTypeAlphaSearch:
+		return t.transformAlphaSearchRequest(ctx, llmReq)
 	case llm.RequestTypeImage:
 		return t.buildImageGenerationAPIRequest(ctx, llmReq)
 	case llm.RequestTypeVideo:
@@ -182,6 +176,9 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	if len(llmReq.Messages) == 0 {
 		return nil, fmt.Errorf("%w: messages are required", transformer.ErrInvalidRequest)
 	}
+	if err := validateChatDocumentParts(llmReq.Messages); err != nil {
+		return nil, err
+	}
 
 	// Determine which reasoning field to use, default to ReasoningFieldContent.
 	// reasoning_content is the standard field used by most providers (OpenAI o-series,
@@ -196,11 +193,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 
 	// Convert to OpenAI Request format (this strips helper fields)
-	oaiReq := RequestFromLLM(llmReq, reasoningField)
-	// Apply per-channel reasoning_effort mapping for non-standard OpenAI-compatible providers.
-	// Entries in the map replace the effort value; values not in the map pass through unchanged.
-	// e.g. ollama channel with {"xhigh": "max"} converts Anthropic's internal "xhigh" back to "max".
-	oaiReq.ReasoningEffort = applyReasoningEffortMapping(oaiReq.ReasoningEffort, t.config.ReasoningEffortMapping)
+	oaiReq := RequestFromLLM(ctx, llmReq, reasoningField)
 	//nolint:exhaustive // Checked.
 	switch t.config.PlatformType {
 	case PlatformOpenAI:
@@ -249,6 +242,12 @@ func (t *OutboundTransformer) TransformResponse(
 ) (*llm.Response, error) {
 	if httpResp == nil {
 		return nil, fmt.Errorf("http response is nil")
+	}
+
+	// Alpha Search owns its error conversion because the upstream response body
+	// can contain provider-specific details that the generic status check drops.
+	if httpResp.Request != nil && httpResp.Request.APIFormat == string(llm.APIFormatOpenAIAlphaSearch) {
+		return t.transformAlphaSearchResponse(ctx, httpResp)
 	}
 
 	// Check for HTTP error status codes

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
+import { copyTextToClipboard } from '@/lib/clipboard';
 import { extractNumberID } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -77,13 +78,20 @@ export function ChannelsTestHistoryDrawer({ open, onOpenChange, channel }: Props
     enabled: open && !!selectedRequestId,
   });
 
-  const copyBody = (data: any) => {
+  const copyBody = async (data: any) => {
+    let text: string;
     try {
-      navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+      text = JSON.stringify(data, null, 2);
     } catch {
-      navigator.clipboard.writeText(String(data));
+      text = String(data);
     }
-    toast.success(t('requests.actions.copy'));
+
+    try {
+      await copyTextToClipboard(text);
+      toast.success(t('requests.actions.copy'));
+    } catch {
+      toast.error(t('common.errors.copyFailed'));
+    }
   };
 
   const handleCurlPreview = () => {
@@ -115,7 +123,7 @@ export function ChannelsTestHistoryDrawer({ open, onOpenChange, channel }: Props
               <p className='text-muted-foreground text-sm'>{channel.name}</p>
             </SheetHeader>
 
-            <ScrollArea className='flex-1'>
+            <ScrollArea className='min-h-0 flex-1'>
               <div className='p-4'>
                 {isLoading ? (
                   <div className='space-y-3'>

@@ -38,6 +38,8 @@ const (
 	FieldReady = "ready"
 	// FieldNextCheckAt holds the string denoting the next_check_at field in the database.
 	FieldNextCheckAt = "next_check_at"
+	// FieldAccountKey holds the string denoting the account_key field in the database.
+	FieldAccountKey = "account_key"
 	// EdgeChannel holds the string denoting the channel edge name in mutations.
 	EdgeChannel = "channel"
 	// Table holds the table name of the providerquotastatus in the database.
@@ -64,6 +66,7 @@ var Columns = []string{
 	FieldNextResetAt,
 	FieldReady,
 	FieldNextCheckAt,
+	FieldAccountKey,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -94,6 +97,8 @@ var (
 	DefaultDeletedAt int
 	// DefaultReady holds the default value on creation for the "ready" field.
 	DefaultReady bool
+	// DefaultAccountKey holds the default value on creation for the "account_key" field.
+	DefaultAccountKey string
 )
 
 // ProviderType defines the type for the "provider_type" enum field.
@@ -101,19 +106,24 @@ type ProviderType string
 
 // ProviderType values.
 const (
-	ProviderTypeClaudecode    ProviderType = "claudecode"
-	ProviderTypeCodex         ProviderType = "codex"
-	ProviderTypeGithubCopilot ProviderType = "github_copilot"
-	ProviderTypeNanogpt       ProviderType = "nanogpt"
-	ProviderTypeCline         ProviderType = "cline"
-	ProviderTypeWafer         ProviderType = "wafer"
-	ProviderTypeSynthetic     ProviderType = "synthetic"
-	ProviderTypeNeuralwatt    ProviderType = "neuralwatt"
-	ProviderTypeApertis       ProviderType = "apertis"
-	ProviderTypeOpencodeGo    ProviderType = "opencode_go"
-	ProviderTypeKimiCode      ProviderType = "kimi_code"
-	ProviderTypeMinimax       ProviderType = "minimax"
-	ProviderTypeZhipu         ProviderType = "zhipu"
+	ProviderTypeClaudecode      ProviderType = "claudecode"
+	ProviderTypeCodex           ProviderType = "codex"
+	ProviderTypeAntigravity     ProviderType = "antigravity"
+	ProviderTypeXaiSubscription ProviderType = "xai_subscription"
+	ProviderTypeGithubCopilot   ProviderType = "github_copilot"
+	ProviderTypeNanogpt         ProviderType = "nanogpt"
+	ProviderTypeCline           ProviderType = "cline"
+	ProviderTypeWafer           ProviderType = "wafer"
+	ProviderTypeSynthetic       ProviderType = "synthetic"
+	ProviderTypeNeuralwatt      ProviderType = "neuralwatt"
+	ProviderTypeApertis         ProviderType = "apertis"
+	ProviderTypeOpencodeGo      ProviderType = "opencode_go"
+	ProviderTypeKimiCode        ProviderType = "kimi_code"
+	ProviderTypeMinimax         ProviderType = "minimax"
+	ProviderTypeZhipu           ProviderType = "zhipu"
+	ProviderTypeCharmHyper      ProviderType = "charm_hyper"
+	ProviderTypeZenmux          ProviderType = "zenmux"
+	ProviderTypeCommandcode     ProviderType = "commandcode"
 )
 
 func (pt ProviderType) String() string {
@@ -123,7 +133,7 @@ func (pt ProviderType) String() string {
 // ProviderTypeValidator is a validator for the "provider_type" field enum values. It is called by the builders before save.
 func ProviderTypeValidator(pt ProviderType) error {
 	switch pt {
-	case ProviderTypeClaudecode, ProviderTypeCodex, ProviderTypeGithubCopilot, ProviderTypeNanogpt, ProviderTypeCline, ProviderTypeWafer, ProviderTypeSynthetic, ProviderTypeNeuralwatt, ProviderTypeApertis, ProviderTypeOpencodeGo, ProviderTypeKimiCode, ProviderTypeMinimax, ProviderTypeZhipu:
+	case ProviderTypeClaudecode, ProviderTypeCodex, ProviderTypeAntigravity, ProviderTypeXaiSubscription, ProviderTypeGithubCopilot, ProviderTypeNanogpt, ProviderTypeCline, ProviderTypeWafer, ProviderTypeSynthetic, ProviderTypeNeuralwatt, ProviderTypeApertis, ProviderTypeOpencodeGo, ProviderTypeKimiCode, ProviderTypeMinimax, ProviderTypeZhipu, ProviderTypeCharmHyper, ProviderTypeZenmux, ProviderTypeCommandcode:
 		return nil
 	default:
 		return fmt.Errorf("providerquotastatus: invalid enum value for provider_type field: %q", pt)
@@ -206,6 +216,11 @@ func ByReady(opts ...sql.OrderTermOption) OrderOption {
 // ByNextCheckAt orders the results by the next_check_at field.
 func ByNextCheckAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldNextCheckAt, opts...).ToFunc()
+}
+
+// ByAccountKey orders the results by the account_key field.
+func ByAccountKey(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAccountKey, opts...).ToFunc()
 }
 
 // ByChannelField orders the results by channel field.

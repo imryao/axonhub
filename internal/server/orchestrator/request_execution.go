@@ -221,11 +221,13 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawError(ctx context.Conte
 	persistCtx, cancel := xcontext.DetachWithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	failure := ClassifyUpstreamTransportError(err)
+
 	updateErr := state.RequestService.UpdateRequestExecutionFailed(
 		persistCtx,
 		state.RequestExec.ID,
-		ExtractErrorMessage(err),
-		ExtractErrorInfo(err),
+		ExtractErrorMessage(failure),
+		ExtractErrorInfo(failure),
 	)
 	if updateErr != nil {
 		log.Warn(persistCtx, "Failed to update request execution status to failed", log.Cause(updateErr))

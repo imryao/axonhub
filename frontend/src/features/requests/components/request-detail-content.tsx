@@ -5,6 +5,7 @@ import { zhCN, enUS } from 'date-fns/locale';
 import { Copy, Clock, Key, Database, FileText, Layers, Download, Terminal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
+import { copyTextToClipboard } from '@/lib/clipboard';
 import { extractNumberID } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -23,6 +24,7 @@ import { ResponseFlow } from './response-flow';
 import { parseResponse } from '../utils/response-parser';
 import { parseRequestConversation } from '../utils/request-conversation';
 import { generateRequestCurl, generateExecutionCurl } from '../utils/curl-generator';
+import { getVideoLastFrameURL, isVideoRequestFormat } from '../utils/video-display';
 
 interface RequestDetailContentProps {
   requestId: string;
@@ -119,9 +121,13 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
     return result.trim();
   }, [request, parsedResponse]);
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    toast.success(t('requests.actions.copy'));
+  const copyToClipboard = async (text: string) => {
+    try {
+      await copyTextToClipboard(text);
+      toast.success(t('requests.actions.copy'));
+    } catch {
+      toast.error(t('common.errors.copyFailed'));
+    }
   };
 
   const downloadFile = (content: string, filename: string) => {
@@ -138,7 +144,8 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
   };
 
   const isSpeechRequest = request?.format === 'openai/audio_speech';
-  const isVideoRequest = request?.format === 'openai/video' || request?.format === 'seedance/video';
+  const isVideoRequest = isVideoRequestFormat(request?.format);
+  const videoLastFrameURL = getVideoLastFrameURL(request?.responseBody);
   const hasStoredContent = !!(request?.contentSaved && request?.contentStorageKey);
 
   // fetchStoredContent downloads the binary artifact (video/audio) saved to external storage
@@ -688,6 +695,15 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                           </div>
                         )}
                       </div>
+                    ) : isVideoRequest && videoLastFrameURL && !hasPreviewData && !isLive ? (
+                      <div className='bg-muted/20 flex min-h-[200px] w-full items-center justify-center rounded-lg border p-6'>
+                        <img
+                          src={videoLastFrameURL}
+                          alt={t('requests.detail.videoLastFrame')}
+                          className='max-h-[500px] max-w-full rounded object-contain'
+                          data-testid='video-last-frame'
+                        />
+                      </div>
                     ) : hasPreviewData || isLive ? (
                       <ResponseFlow
                         chunks={request.responseChunks}
@@ -824,7 +840,7 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                                 {t('requests.columns.firstTokenLatency')}
                               </span>
                               <p className='text-muted-foreground font-mono text-sm'>
-                                {execution.status === 'completed' && execution.metricsFirstTokenLatencyMs != null ? formatLatency(execution.metricsFirstTokenLatencyMs) : '-'}
+                                {(execution.status === 'completed' || execution.status === 'failed') && execution.metricsFirstTokenLatencyMs != null ? formatLatency(execution.metricsFirstTokenLatencyMs) : '-'}
                               </p>
                             </div>
                           </div>

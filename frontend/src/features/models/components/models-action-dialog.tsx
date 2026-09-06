@@ -39,7 +39,7 @@ function isDeveloper(provider: string) {
 }
 
 export function ModelsActionDialog() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { open, setOpen, currentRow } = useModels();
   const createModel = useCreateModel();
   const updateModel = useUpdateModel();
@@ -73,12 +73,20 @@ export function ModelsActionDialog() {
     return provider?.models || [];
   }, [selectedProvider, providers]);
 
+  const getDeveloperLabel = useCallback(
+    (developer: string) => {
+      const key = `models.developers.${developer}`;
+      return i18n.exists(key) ? t(key) : developer;
+    },
+    [i18n, t]
+  );
+
   const developerOptions = useMemo(() => {
     return DEVELOPER_IDS.map((id) => ({
       value: id,
-      label: id,
+      label: getDeveloperLabel(id),
     }));
-  }, []);
+  }, [getDeveloperLabel]);
 
   const modelIdOptions = useMemo(() => {
     return selectedProviderModels.map((m: ProviderModel) => ({
@@ -135,7 +143,6 @@ export function ModelsActionDialog() {
         remark: currentRow.remark || '',
       });
       setSelectedProvider(currentRow.developer);
-      setDeveloperSearchValue(currentRow.developer);
       setModelIdInput(currentRow.modelID);
       setModelIdSearchValue(currentRow.modelID);
       setSelectedModelCard(currentRow.modelCard || {});
@@ -159,10 +166,16 @@ export function ModelsActionDialog() {
     }
   }, [isEdit, currentRow, form, isOpen]);
 
+  useEffect(() => {
+    if (isEdit && currentRow) {
+      setDeveloperSearchValue(getDeveloperLabel(currentRow.developer));
+    }
+  }, [currentRow, getDeveloperLabel, isEdit]);
+
   const handleProviderChange = useCallback(
     (providerId: string) => {
       setSelectedProvider(providerId);
-      setDeveloperSearchValue(providerId);
+      setDeveloperSearchValue(getDeveloperLabel(providerId));
       form.setValue('developer', providerId);
       if (!isEdit) {
         const icon = DEVELOPER_ICONS[providerId] || providerId;
@@ -176,7 +189,19 @@ export function ModelsActionDialog() {
         setSelectedModelCard({});
       }
     },
-    [form, isEdit]
+    [form, getDeveloperLabel, isEdit]
+  );
+
+  // 用户直接在输入框键入时实时同步 form 值，避免 blur/submit 竞态导致提交旧值。
+  // 注意不要同步 modelIdInput：它是 AutoComplete 的“已提交选中值”，若跟随搜索词变化，
+  // 手输完整 model ID 后再点选该项会被判定为取消选择而清空，blur 时也不会再触发
+  // handleModelIdChange，导致新建模型时 name/group/type/modelCard 无法回填。
+  const handleModelIdSearchChange = useCallback(
+    (value: string) => {
+      setModelIdSearchValue(value);
+      form.setValue('modelID', value);
+    },
+    [form]
   );
 
   const handleModelIdChange = useCallback(
@@ -313,7 +338,7 @@ export function ModelsActionDialog() {
                               selectedValue={modelIdInput}
                               onSelectedValueChange={handleModelIdChange}
                               searchValue={modelIdSearchValue}
-                              onSearchValueChange={setModelIdSearchValue}
+                              onSearchValueChange={handleModelIdSearchChange}
                               items={modelIdOptions}
                               placeholder={t('models.fields.modelIdPlaceholder')}
                               emptyMessage={t('models.fields.noModels')}
@@ -324,7 +349,7 @@ export function ModelsActionDialog() {
                               selectedValue={modelIdInput}
                               onSelectedValueChange={handleModelIdChange}
                               searchValue={modelIdSearchValue}
-                              onSearchValueChange={setModelIdSearchValue}
+                              onSearchValueChange={handleModelIdSearchChange}
                               items={[]}
                               placeholder={t('models.fields.modelIdPlaceholder')}
                               emptyMessage={t('models.fields.noModels')}

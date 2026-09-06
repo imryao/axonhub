@@ -216,7 +216,11 @@ func TestSystemService_StoragePolicy(t *testing.T) {
 	require.False(t, policy.LivePreview)
 	require.True(t, policy.StoreRequestBody)
 	require.True(t, policy.StoreResponseBody)
-	require.Len(t, policy.CleanupOptions, 2)
+	require.True(t, hasCleanupResource(policy.CleanupOptions, CleanupResourceRequests))
+	require.True(t, hasCleanupResource(policy.CleanupOptions, CleanupResourceUsageLogs))
+	require.True(t, hasCleanupResource(policy.CleanupOptions, CleanupResourceRequestBodies))
+	require.True(t, hasCleanupResource(policy.CleanupOptions, CleanupResourceResponseBodies))
+	require.True(t, hasCleanupResource(policy.CleanupOptions, CleanupResourceResponseChunks))
 
 	// Test setting custom storage policy
 	customPolicy := &StoragePolicy{
@@ -242,8 +246,8 @@ func TestSystemService_StoragePolicy(t *testing.T) {
 	require.Equal(t, customPolicy.LivePreview, retrievedPolicy.LivePreview)
 	require.Equal(t, customPolicy.StoreRequestBody, retrievedPolicy.StoreRequestBody)
 	require.Equal(t, customPolicy.StoreResponseBody, retrievedPolicy.StoreResponseBody)
-	require.Len(t, retrievedPolicy.CleanupOptions, 1)
 	require.Equal(t, "custom_resource", retrievedPolicy.CleanupOptions[0].ResourceType)
+	require.True(t, hasCleanupResource(retrievedPolicy.CleanupOptions, CleanupResourceRequestBodies))
 
 	// Test StoreChunks convenience method
 	storeChunks, err := service.StoreChunks(ctx)
@@ -784,7 +788,49 @@ func TestSystemService_BackwardCompatibility(t *testing.T) {
 	require.True(t, policy.StoreChunks)
 	require.True(t, policy.StoreRequestBody)  // Should default to true
 	require.True(t, policy.StoreResponseBody) // Should default to true
-	require.Len(t, policy.CleanupOptions, 1)
+	require.True(t, hasCleanupResource(policy.CleanupOptions, CleanupResourceRequests))
+	require.True(t, hasCleanupResource(policy.CleanupOptions, CleanupResourceRequestBodies))
+	require.True(t, hasCleanupResource(policy.CleanupOptions, CleanupResourceResponseBodies))
+	require.True(t, hasCleanupResource(policy.CleanupOptions, CleanupResourceResponseChunks))
+}
+
+func hasCleanupResource(options []CleanupOption, resourceType string) bool {
+	for _, opt := range options {
+		if opt.ResourceType == resourceType {
+			return true
+		}
+	}
+
+	return false
+}
+
+func TestMergeCleanupOptions(t *testing.T) {
+	merged := mergeCleanupOptions([]CleanupOption{
+		{ResourceType: CleanupResourceRequests, Enabled: true, CleanupDays: 5},
+	})
+
+	require.True(t, hasCleanupResource(merged, CleanupResourceRequests))
+	require.True(t, hasCleanupResource(merged, CleanupResourceUsageLogs))
+	require.True(t, hasCleanupResource(merged, CleanupResourceRequestBodies))
+	require.True(t, hasCleanupResource(merged, CleanupResourceResponseBodies))
+	require.True(t, hasCleanupResource(merged, CleanupResourceResponseChunks))
+
+	for _, opt := range merged {
+		if opt.ResourceType == CleanupResourceRequests {
+			require.True(t, opt.Enabled)
+			require.Equal(t, 5, opt.CleanupDays)
+		}
+
+		if opt.ResourceType == CleanupResourceRequestBodies {
+			require.False(t, opt.Enabled)
+			require.Equal(t, 7, opt.CleanupDays)
+		}
+
+		if opt.ResourceType == CleanupResourceResponseChunks {
+			require.False(t, opt.Enabled)
+			require.Equal(t, 3, opt.CleanupDays)
+		}
+	}
 }
 
 func TestSystemService_ModelSettingsBackwardCompatibility(t *testing.T) {
@@ -817,6 +863,7 @@ func TestSystemService_ModelSettingsBackwardCompatibility(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, settings.FallbackToChannelsOnModelNotFound)
 	require.True(t, settings.QueryAllChannelModels)
+	require.False(t, settings.HideUnroutableModelsInList)
 	require.NotNil(t, settings.DeveloperSettings)
 	require.Empty(t, settings.DeveloperSettings)
 }
@@ -1300,6 +1347,29 @@ func TestSystemService_UserAgentPassThrough_WithCache(t *testing.T) {
 	uaPassThrough3, err := service.UserAgentPassThrough(ctx)
 	require.NoError(t, err)
 	require.False(t, uaPassThrough3)
+}
+
+func TestSystemService_InjectUsageCostEnabled(t *testing.T) {
+	service, client := setupTestSystemService(t, xcache.Config{Mode: xcache.ModeMemory}) //nolint:exhaustruct_v5
+	defer client.Close()
+
+	ctx := context.Background()
+	ctx = ent.NewContext(ctx, client)
+	ctx = authz.WithTestBypass(ctx)
+
+	got, err := service.InjectUsageCostEnabled(ctx)
+	require.NoError(t, err)
+	require.False(t, got)
+
+	require.NoError(t, service.SetInjectUsageCostEnabled(ctx, true))
+	got, err = service.InjectUsageCostEnabled(ctx)
+	require.NoError(t, err)
+	require.True(t, got)
+
+	require.NoError(t, service.SetInjectUsageCostEnabled(ctx, false))
+	got, err = service.InjectUsageCostEnabled(ctx)
+	require.NoError(t, err)
+	require.False(t, got)
 }
 
 func TestNormalizeRetryPolicy_LoadBalancerStrategy(t *testing.T) {

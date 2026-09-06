@@ -8,8 +8,10 @@ export interface RequestPermissions {
   canViewApiKeys: boolean;
   canViewChannels: boolean;
   canViewRoles: boolean;
+  canViewCallerUser: boolean;
 }
 
+/** Returns request-view permissions for the selected project's effective scopes. */
 export function useRequestPermissions(): RequestPermissions {
   const { user: authUser } = useAuthStore((state) => state.auth);
   const { data: meData } = useMe();
@@ -26,20 +28,26 @@ export function useRequestPermissions(): RequestPermissions {
       return [];
     }
     const project = user.projects.find((p) => p.projectID === selectedProjectId);
-    return project?.scopes || [];
+    return project?.effectiveScopes || project?.scopes || [];
   }, [selectedProjectId, user?.projects]);
+
+  const isProjectOwner = useMemo(() => {
+    if (isOwner) return true;
+    return user?.projects?.some((project) => project.projectID === selectedProjectId && project.isOwner) ?? false;
+  }, [isOwner, selectedProjectId, user?.projects]);
 
   const permissions = useMemo(() => {
     // 合并系统级和项目级权限
     const userScopes = [...systemScopes, ...projectScopes];
 
     // Owner用户拥有所有权限
-    if (isOwner || userScopes.includes('*')) {
+    if (isProjectOwner || userScopes.includes('*')) {
       return {
         canViewUsers: true,
         canViewApiKeys: true,
         canViewChannels: true,
         canViewRoles: true,
+        canViewCallerUser: isProjectOwner,
       };
     }
 
@@ -48,8 +56,9 @@ export function useRequestPermissions(): RequestPermissions {
       canViewApiKeys: userScopes.includes('read_api_keys'),
       canViewChannels: userScopes.includes('read_channels'),
       canViewRoles: userScopes.includes('read_roles'),
+      canViewCallerUser: false,
     };
-  }, [systemScopes, projectScopes, isOwner]);
+  }, [systemScopes, projectScopes, isProjectOwner]);
 
   return permissions;
 }

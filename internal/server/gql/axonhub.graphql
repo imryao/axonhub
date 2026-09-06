@@ -132,22 +132,36 @@ input RetryableErrorPatternInput {
   regex: Boolean
 }
 
-type OpenCodeGoQuotaSettings {
-  workspaceId: String
+type ModelProtocol {
+  model: String!
+  apiFormats: [String!]!
+  enabled: Boolean
+}
+
+input ModelProtocolInput {
+  model: String!
+  apiFormats: [String!]!
+  enabled: Boolean
+}
+
+# ProviderQuota carries credentials used only for provider quota polling
+# (e.g. the Command Code account session cookie). These are sensitive: the
+# output resolver only returns them to operators with write_channels, and the
+# values are never part of ordinary channel reads.
+type CommandCodeQuotaSettings {
   authCookie: String
 }
 
-input OpenCodeGoQuotaSettingsInput {
-  workspaceId: String
+input CommandCodeQuotaSettingsInput {
   authCookie: String
 }
 
 type ChannelProviderQuotaSettings {
-  opencodeGo: OpenCodeGoQuotaSettings
+  commandCode: CommandCodeQuotaSettings
 }
 
 input ChannelProviderQuotaSettingsInput {
-  opencodeGo: OpenCodeGoQuotaSettingsInput
+  commandCode: CommandCodeQuotaSettingsInput
 }
 
 type ChannelSettings {
@@ -166,7 +180,8 @@ type ChannelSettings {
   rateLimit: ChannelRateLimit
   retryableStatusCodes: [Int!]
   retryableErrorPatterns: [RetryableErrorPattern!]
-  providerQuota: ChannelProviderQuotaSettings
+  modelProtocols: [ModelProtocol!]
+  providerQuota: ChannelProviderQuotaSettings @goField(forceResolver: true)
 }
 
 enum CapabilityPolicy {
@@ -233,6 +248,7 @@ input ChannelSettingsInput {
   rateLimit: ChannelRateLimitInput
   retryableStatusCodes: [Int!]
   retryableErrorPatterns: [RetryableErrorPatternInput!]
+  modelProtocols: [ModelProtocolInput!]
   providerQuota: ChannelProviderQuotaSettingsInput
 }
 
@@ -287,6 +303,7 @@ input ChannelCredentialsInput {
   apiKeys: [String!]
   gcp: GCPCredentialInput
   oauth: OAuthCredentialsInput
+  managementApiKey: String
 }
 
 input OAuthCredentialsInput {

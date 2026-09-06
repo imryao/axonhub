@@ -9,6 +9,7 @@ import (
 
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/objects"
+	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/llm"
 )
 
@@ -29,7 +30,7 @@ func filterResolvedCandidatesForRequest(
 	})
 	if !hasConditionalCandidates {
 		candidates := aggregateChannelModelCandidates(resolvedCandidates)
-		populateAPIFormat(candidates, req)
+		candidates = populateAPIFormat(ctx, candidates, req)
 
 		return candidates
 	}
@@ -63,24 +64,64 @@ func filterResolvedCandidatesForRequest(
 		)
 	}
 
-	populateAPIFormat(candidates, req)
+	candidates = populateAPIFormat(ctx, candidates, req)
 
 	return candidates
 }
 
-func populateAPIFormat(candidates []*ChannelModelsCandidate, req *llm.Request) {
+func populateAPIFormat(ctx context.Context, candidates []*ChannelModelsCandidate, req *llm.Request) []*ChannelModelsCandidate {
+	filtered := make([]*ChannelModelsCandidate, 0, len(candidates))
 	for _, c := range candidates {
 		if c == nil || c.Channel == nil {
 			continue
 		}
 
-		if c.APIFormat != "" {
+		// A candidate may contain several models that are retried in order. Apply
+		// protocol overrides to one model at a time; applying them to the whole
+		// slice would merge unrelated model overrides and select the wrong
+		// protocol for the first attempt.
+		baseEndpoints := c.Channel.ResolveEndpoints()
+		if len(c.Models) > 0 {
+			selectedModels := make([]biz.ChannelModelEntry, 0, len(c.Models))
+			selectedFormats := make([]string, 0, len(c.Models))
+			for _, entry := range c.Models {
+				endpoints := applyForcedAPIFormats(ctx, c.Channel, []biz.ChannelModelEntry{entry}, req.Model, baseEndpoints)
+				format := SelectAPIFormat(endpoints, req)
+				// Alpha Search has no generic fallback. A model whose forced protocol
+				// list cannot serve Alpha Search must not remain as the first retry
+				// entry, otherwise an empty candidate format falls back to the channel's
+				// primary (usually chat) outbound.
+				if req.RequestType == llm.RequestTypeAlphaSearch && format == "" {
+					continue
+				}
+
+				selectedModels = append(selectedModels, entry)
+				selectedFormats = append(selectedFormats, format)
+			}
+
+			if len(selectedModels) == 0 {
+				continue
+			}
+
+			if req.RequestType == llm.RequestTypeAlphaSearch {
+				c.Models = selectedModels
+			}
+			c.modelAPIFormats = selectedFormats
+			c.APIFormat = selectedFormats[0]
+		} else {
+			c.modelAPIFormats = nil
+			endpoints := applyForcedAPIFormats(ctx, c.Channel, c.Models, req.Model, baseEndpoints)
+			c.APIFormat = SelectAPIFormat(endpoints, req)
+		}
+
+		if req.RequestType == llm.RequestTypeAlphaSearch && c.APIFormat == "" {
 			continue
 		}
 
-		endpoints := c.Channel.ResolveEndpoints()
-		c.APIFormat = SelectAPIFormat(endpoints, req)
+		filtered = append(filtered, c)
 	}
+
+	return filtered
 }
 
 func reqStream(req *llm.Request) bool {

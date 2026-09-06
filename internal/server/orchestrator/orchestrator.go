@@ -2,12 +2,10 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/contexts"
-	"github.com/looplj/axonhub/internal/ent/requestexecution"
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/metrics"
 	"github.com/looplj/axonhub/internal/pkg/xcontext"
@@ -18,6 +16,7 @@ import (
 	"github.com/looplj/axonhub/llm/pipeline/stream"
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
+	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 func NewChatCompletionOrchestrator(
@@ -83,7 +82,6 @@ func NewChatCompletionOrchestrator(
 		PromptProvider:     promptService,
 		PromptProtecter:    promptProtectionRuleService,
 		Middlewares: []pipeline.Middleware{
-			cc.StripBillingHeaderCCH(),
 			cc.SystemCacheCompatibility(),
 			stream.EnsureUsage(),
 		},
@@ -100,6 +98,7 @@ func NewChatCompletionOrchestrator(
 		modelCircuitBreaker:        modelCircuitBreaker,
 		quotaProvider:              quotaProvider,
 		proxy:                      nil,
+		responsesSessions:          newResponsesSessionStore(requestService.LoadCompletedResponsesSession),
 	}
 }
 
@@ -142,6 +141,8 @@ type ChatCompletionOrchestrator struct {
 	// proxy is the proxy configuration for testing
 	// If set, it will override the channel's default proxy configuration
 	proxy *httpclient.ProxyConfig
+
+	responsesSessions *responsesSessionStore
 }
 
 func (processor *ChatCompletionOrchestrator) WithChannelSelector(selector CandidateSelector) *ChatCompletionOrchestrator {
@@ -171,6 +172,14 @@ type ChatCompletionResult struct {
 }
 
 func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, request *httpclient.Request) (ChatCompletionResult, error) {
+	var preparedResponsesBody []byte
+	if shared.IsResponsesAPI(ctx) && request != nil && processor.responsesSessions != nil {
+		var sessionID string
+		preparedResponsesBody, sessionID = processor.responsesSessions.prepare(ctx, request.Body)
+		request.Body = preparedResponsesBody
+		ctx = shared.WithSessionID(ctx, sessionID)
+	}
+
 	// API key providers cannot return a derived context, so install the shared
 	// request container before provider selection mutates it.
 	ctx = contexts.EnsureContainer(ctx)
@@ -185,11 +194,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 
 	if log.DebugEnabled(ctx) {
 		log.Debug(ctx, "chat request received",
-			log.String("request_body", string(request.Body)),
-			log.Any("request_headers", request.Headers),
-			log.Any("retry_policy", retryPolicy),
-			log.String("system_load_balance_strategy", retryPolicy.LoadBalancerStrategy),
-			log.String("system_trace_sticky_mode", string(retryPolicy.TraceStickyMode)),
+			inboundRequestDebugFields(request, retryPolicy)...,
 		)
 	}
 
@@ -197,6 +202,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		APIKey:              apiKey,
 		RequestService:      processor.RequestService,
 		UsageLogService:     processor.UsageLogService,
+		SystemService:       processor.SystemService,
 		ChannelService:      processor.ChannelService,
 		PromptProvider:      processor.PromptProvider,
 		PromptProtecter:     processor.PromptProtecter,
@@ -244,8 +250,9 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 
 	// Add global middlewares
 	middlewares = append(middlewares, processor.Middlewares...)
+	middlewares = append(middlewares, newBillingSystemMessageMiddleware(state))
 
-	inbound, outbound := NewPersistentTransformers(state, processor.Inbound, processor.Middlewares...)
+	inbound, outbound := NewPersistentTransformers(state, processor.Inbound, middlewares...)
 
 	// Add inbound middlewares (executed after inbound.TransformRequest)
 	middlewares = append(middlewares,
@@ -276,6 +283,9 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		// This allows override headers to modify the User-Agent if configured.
 		applyUserAgentPassThrough(outbound, processor.SystemService),
 		applyOverrideRequestHeaders(outbound),
+		// Remove transport-incompatible fields after pass-through and overrides,
+		// so persistence and execution observe the same provider request.
+		finalizeTransportRequest(outbound),
 
 		// Unified performance tracking middleware.
 		withPerformanceRecording(outbound),
@@ -320,16 +330,12 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		// Update the last request execution status based on error if it exists
 		// This ensures that when retry fails completely, the last execution is properly marked
 		if requestExec := outbound.GetRequestExecution(); requestExec != nil {
-			status := requestexecution.StatusFailed
-			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-				status = requestexecution.StatusCanceled
-			}
-			if updateErr := processor.RequestService.UpdateRequestExecutionStatus(
+			if updateErr := persistRequestExecutionFailure(
 				persistCtx,
+				processor.RequestService,
 				requestExec.ID,
-				status,
-				ExtractErrorMessage(err),
-				ExtractErrorInfo(err),
+				err,
+				nil,
 			); updateErr != nil {
 				log.Warn(persistCtx, "Failed to update request execution status from error", log.Cause(updateErr))
 			}
@@ -352,10 +358,16 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 
 	// Return result based on stream type
 	if result.Stream {
+		if preparedResponsesBody != nil {
+			result.EventStream = processor.responsesSessions.wrapStream(ctx, preparedResponsesBody, result.EventStream)
+		}
 		return ChatCompletionResult{
 			ChatCompletion:       nil,
 			ChatCompletionStream: result.EventStream,
 		}, nil
+	}
+	if preparedResponsesBody != nil && result.Response != nil {
+		processor.responsesSessions.record(ctx, preparedResponsesBody, result.Response.Body)
 	}
 
 	return ChatCompletionResult{

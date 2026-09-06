@@ -181,11 +181,13 @@ enum QuotaEnforcementMode {
 type QuotaEnforcementSettings {
   enabled: Boolean!
   mode: QuotaEnforcementMode!
+  allowedChannelIDs: [ID!]!
 }
 
 input UpdateQuotaEnforcementSettingsInput {
   enabled: Boolean
   mode: QuotaEnforcementMode
+  allowedChannelIDs: [ID!]
 }
 
 type ProviderQuotaCollectionProvider {
@@ -224,6 +226,7 @@ type SystemModelSettings {
   defaultModelAPIIncludeAll: Boolean!
   autoReasoningEffort: Boolean!
   modelBlacklistRegex: String!
+  hideUnroutableModelsInList: Boolean!
   developerSettings: [DeveloperModelSettings!]!
 }
 
@@ -233,6 +236,7 @@ input UpdateSystemModelSettingsInput {
   defaultModelAPIIncludeAll: Boolean
   autoReasoningEffort: Boolean
   modelBlacklistRegex: String
+  hideUnroutableModelsInList: Boolean
   developerSettings: [DeveloperModelSettingsInput!]
 }
 
@@ -363,6 +367,13 @@ input UpdatePassThroughSettingsInput {
   enabled: Boolean!
 }
 
+type UsageCostInjectionSettings {
+  enabled: Boolean!
+}
+
+input UpdateUsageCostInjectionSettingsInput {
+  enabled: Boolean!
+}
 
 type ProxyPreset {
   name: String
@@ -381,6 +392,9 @@ input SaveProxyPresetInput {
 input TriggerGcCleanupInput {
     requestsCleanupDays: Int!
     usageLogsCleanupDays: Int!
+    requestBodiesCleanupDays: Int
+    responseBodiesCleanupDays: Int
+    responseChunksCleanupDays: Int
 }
 
 type GcCleanupPreviewItem {
@@ -388,6 +402,23 @@ type GcCleanupPreviewItem {
     estimatedCount: Int!
     cutoffTime: Time!
     retentionDays: Int!
+}
+
+type ProvidersCatalog {
+  data: JSONRawMessage!
+  fetchedAt: Time
+  source: String!
+  filtered: Boolean!
+}
+
+type CatalogSettings {
+  upstreamURL: String!
+  refreshSeconds: Int!
+}
+
+input UpdateCatalogSettingsInput {
+  upstreamURL: String
+  refreshSeconds: Int
 }
 
 extend type Mutation {
@@ -413,10 +444,15 @@ extend type Mutation {
   deleteProxyPreset(url: String!): Boolean!
   updateUserAgentPassThroughSettings(input: UpdateUserAgentPassThroughSettingsInput!): Boolean!
   updatePassThroughSettings(input: UpdatePassThroughSettingsInput!): Boolean!
+  updateUsageCostInjectionSettings(input: UpdateUsageCostInjectionSettingsInput!): Boolean!
+  updateCatalogSettings(input: UpdateCatalogSettingsInput!): Boolean!
+  refreshProvidersCatalog: ProvidersCatalog!
 }
 
 extend type Query {
   previewGcCleanup(input: TriggerGcCleanupInput!): [GcCleanupPreviewItem!]!
+  providersCatalog(filtered: Boolean = true): ProvidersCatalog!
+  catalogSettings: CatalogSettings!
 }
 
 type SystemVersion {
@@ -479,6 +515,7 @@ extend type Query {
   proxyPresets: [ProxyPreset!]!
   userAgentPassThroughSettings: UserAgentPassThroughSettings!
   passThroughSettings: PassThroughSettings!
+  usageCostInjectionSettings: UsageCostInjectionSettings!
   getCacheDiagnostics(input: GetCacheDiagnosticsInput): GetCacheDiagnosticsPayload!
 }
 

@@ -1,52 +1,17 @@
 import { CHANNEL_CONFIGS } from '@/features/channels/data/config_channels';
 import { ApiFormat } from '@/features/channels/data/schema';
+import { getApiPath } from './curl-paths';
+import { escapeShellValue } from './curl-shell';
 
 export type ChannelType = keyof typeof CHANNEL_CONFIGS;
 
 export interface CurlGeneratorOptions {
-  headers?: Record<string, any>;
-  body?: any;
+  headers?: Record<string, unknown>;
+  body?: unknown;
   baseUrl?: string;
   requestURL?: string;
   apiFormat?: ApiFormat;
   channelType?: ChannelType;
-}
-
-const API_FORMAT_PATHS: Record<ApiFormat, string> = {
-  'openai/chat_completions': '/v1/chat/completions',
-  'openai/responses': '/v1/responses',
-  'openai/image_generation': '/v1/images/generations',
-  'openai/image_edit': '/v1/images/edits',
-  'openai/image_variation': '/v1/images/variations',
-  'openai/embeddings': '/v1/embeddings',
-  'openai/moderations': '/v1/moderations',
-  'openai/video': '/v1/videos',
-  'openai/audio_speech': '/v1/audio/speech',
-  'openai/audio_transcriptions': '/v1/audio/transcriptions',
-  'openai/audio_translations': '/v1/audio/translations',
-  'anthropic/messages': '/v1/messages',
-  'gemini/contents': '/v1beta/models/{model}:generateContent',
-  'aisdk/text': '/api/chat',
-  'aisdk/datastream': '/api/datastream',
-  'jina/rerank': '/v1/rerank',
-  'jina/embeddings': '/jina/v1/embeddings',
-};
-
-function getApiPath(apiFormat?: ApiFormat, body?: any, channelType?: ChannelType): string {
-  if (!apiFormat) {
-    return '/v1/chat/completions';
-  }
-
-  let path = API_FORMAT_PATHS[apiFormat] || '/v1/chat/completions';
-
-  if (apiFormat === 'gemini/contents' && body?.model) {
-    if (channelType === 'gemini_vertex') {
-      path = '/v1/publishers/google/models/{model}:generateContent';
-    }
-    path = path.replace('{model}', body.model);
-  }
-
-  return path;
 }
 
 function getApiFormatFromChannelType(channelType?: ChannelType): ApiFormat | undefined {
@@ -66,7 +31,10 @@ function resolveExecutionURL(options: CurlGeneratorOptions, apiFormat?: ApiForma
   const apiPath = getApiPath(apiFormat, body, channelType);
 
   if (options.baseUrl) {
-    const cleanBaseUrl = options.baseUrl.replace(/\/+$/, '');
+    const baseUrlWithoutMarker = options.baseUrl.endsWith('#')
+      ? options.baseUrl.slice(0, -1)
+      : options.baseUrl;
+    const cleanBaseUrl = baseUrlWithoutMarker.replace(/\/+$/, '');
     // Avoid path duplication: if baseUrl ends with a prefix of apiPath, strip the overlap.
     let combinedPath = apiPath;
     for (let i = 1; i <= apiPath.length; i++) {
@@ -88,7 +56,11 @@ export function generateCurlCommand(options: CurlGeneratorOptions): string {
   const resolvedApiFormat = inferApiFormat(apiFormat || getApiFormatFromChannelType(channelType), parsedBody);
   const url = resolveExecutionURL({ baseUrl, requestURL }, resolvedApiFormat, parsedBody, channelType);
 
-  const curlParts = [`curl '${url}'`];
+  if (resolvedApiFormat === 'openai/responses-ws') {
+    return generateResponsesWebSocketCommand(headers, parsedBody, url);
+  }
+
+  const curlParts = [`curl '${escapeShellValue(url)}'`];
 
   // Audio transcription/translation use multipart/form-data, not JSON.
   const isMultipartAudio = resolvedApiFormat === 'openai/audio_transcriptions' || resolvedApiFormat === 'openai/audio_translations';
@@ -134,6 +106,46 @@ export function generateCurlCommand(options: CurlGeneratorOptions): string {
   }
 
   return curlParts.join(' \\\n');
+}
+
+function generateResponsesWebSocketCommand(headers: Record<string, unknown> | undefined, body: unknown, url: string): string {
+  const websocketURL = toWebSocketURL(url);
+  const commandParts = [`npx wscat -c '${escapeShellValue(websocketURL)}'`];
+
+  if (headers && typeof headers === 'object') {
+    const skipHeaders = [
+      'content-length',
+      'host',
+      'connection',
+      'upgrade',
+      'accept-encoding',
+      'transfer-encoding',
+      'sec-websocket-key',
+      'sec-websocket-version',
+      'sec-websocket-extensions',
+    ];
+    Object.entries(headers).forEach(([key, value]) => {
+      if (!skipHeaders.includes(key.toLowerCase()) && value) {
+        commandParts.push(`  -H '${escapeShellValue(`${key}: ${String(value)}`)}'`);
+      }
+    });
+  }
+
+  const payload: Record<string, unknown> = isRecord(body) ? { ...body } : { input: body };
+  delete payload.stream;
+  if (!payload.type) {
+    payload.type = 'response.create';
+  }
+  const bodyValue = JSON.stringify(payload) ?? '{}';
+  commandParts.push(`  -x '${escapeShellValue(bodyValue)}'`);
+
+  return commandParts.join(' \\\n');
+}
+
+function toWebSocketURL(url: string): string {
+  if (url.startsWith('https://')) return `wss://${url.slice('https://'.length)}`;
+  if (url.startsWith('http://')) return `ws://${url.slice('http://'.length)}`;
+  return url;
 }
 
 function safeJsonParse(value: string): unknown {
@@ -233,15 +245,11 @@ function formatFormValue(value: unknown): string {
   return JSON.stringify(value) ?? String(value);
 }
 
-function escapeShellValue(value: string): string {
-  return value.replace(/'/g, "'\\''");
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-export function generateRequestCurl(headers: any, body: any, apiFormat?: ApiFormat): string {
+export function generateRequestCurl(headers: Record<string, unknown> | undefined, body: unknown, apiFormat?: ApiFormat): string {
   return generateCurlCommand({
     headers,
     body,
@@ -250,8 +258,8 @@ export function generateRequestCurl(headers: any, body: any, apiFormat?: ApiForm
 }
 
 export function generateExecutionCurl(
-  headers: any,
-  body: any,
+  headers: Record<string, unknown> | undefined,
+  body: unknown,
   channel?: { baseURL?: string; type?: ChannelType },
   apiFormat?: ApiFormat,
   requestURL?: string

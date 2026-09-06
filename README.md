@@ -27,34 +27,44 @@
 <table width="100%">
   <tr>
     <td width="50%" align="center" valign="top">
-      <a href="https://lj.s.gy/oZl7Vd" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/sponsors/atlas-cloud-logomark-white.svg"/>
-          <source media="(prefers-color-scheme: light)" srcset="docs/sponsors/atlas-cloud-logomark-black.svg"/>
-          <img src="docs/sponsors/atlas-cloud-logomark-black.svg" alt="Atlas Cloud" height="50"/>
-        </picture>
+      <a href="https://apikey.fun/register?aff=axonhub" target="_blank">
+        <img src="docs/sponsors/apikey-fun.png" alt="APIKEY.FUN" height="50"/>
         <br/>
-        <strong>Atlas Cloud</strong>
+        <strong>APIKEY.FUN</strong>
       </a>
-      <p align="left">
-        <a href="https://lj.s.gy/oZl7Vd" target="_blank">Atlas Cloud</a> 是一个全模态 AI 推理平台，为开发者提供统一的 AI API 来访问视频生成、图像生成和 LLM API。无需管理多个供应商集成，只需连接一次即可统一访问 300+ 精选模型，涵盖所有模态。
-      </p>
-      <p align="left">
-        查看 Atlas Cloud 的 <a href="https://lj.s.gy/jknt2V" target="_blank">全新 Coding plan 促销</a>，获取更经济实惠的 API 访问方案。
-      </p>
+      <div align="center">
+        <a href="https://apikey.fun/register?aff=axonhub" target="_blank">
+          <img src="docs/sponsors/api-key.fun.banner.png" alt="APIKEY.FUN banner" width="100%"/>
+        </a>
+      </div>
+      <div align="left">
+        APIKEY.FUN 是一家专业的企业级 AI 中转站，致力于为企业和个人开发者提供稳定、高效、低成本的 AI 模型 API 接入服务。<br/>
+        平台支持 Claude、OpenAI、Gemini 等主流热门模型，价格低至官方原价的 7%。<br/>
+        AxonHub 用户通过<a href="https://apikey.fun/register?aff=axonhub" target="_blank">专属链接注册</a>，还可享受最高充值永久 95 折专属优惠。
+      </div>
     </td>
     <td width="50%" align="center" valign="top">
-      <a href="https://lj.s.gy/jKk8uU" target="_blank">
-        <img src="https://raw.githubusercontent.com/Krill-ai-org/krill-ai-static/refs/heads/main/krill-logo/Eng/250x150.png" alt="Krill AI" height="50"/>
+      <a href="https://lj.s.gy/DUq59H" target="_blank">
+        <img src="https://www.infistar.cc/logo.png" alt="无限星河 Infistar.cc" height="50"/>
         <br/>
-        <strong>Krill AI</strong>
+        <strong>无限星河 Infistar.cc</strong>
       </a>
-      <p align="left">
-        感谢 Krill AI 赞助本项目。Krill 提供 GPT、Claude、Gemini 及多款国产模型的官方稳定极速 API 中转服务，支持企业级定制、报销开票和 7x16 小时专属技术支持。其独家适配的 WebSocket 连接方式可带来更快的首字速度。
-      </p>
-      <p align="left">
-        使用 <a href="https://lj.s.gy/jKk8uU" target="_blank">此链接</a> 注册，并在充值时填写 <code>AxonHub</code> 优惠码，首次购买 Codex 套餐可享 77 折优惠。
-      </p>
+      <div align="center">
+        <a href="https://lj.s.gy/DUq59H" target="_blank">
+          <img src="docs/sponsors/infistar-banner.png" alt="Infistar.cc 无限星河" width="100%"/>
+        </a>
+      </div>
+      <div align="left">
+       <strong>AxonHub × Infistar.cc 无限星河｜高可用全模型 API</strong>
+      </div>
+      <div align="left">
+        ⚡ 企业级高并发稳定调度｜官方 1 折起 · 透明倍率 · 多节点冗余<br/>
+        🧠 全系模型支持｜ChatGPT · Claude · Gemini · DeepSeek<br/>
+        🎨 全模态接入｜文本 · 图像 · 视频 · Embedding / Rerank
+      </div>
+      <div align="left">
+        AxonHub 用户通过<a href="https://lj.s.gy/DUq59H" target="_blank">专属链接</a>注册，可享专属特惠。
+      </div>
     </td>
   </tr>
 </table>
@@ -265,276 +275,70 @@
 ---
 
 
-## 🚀 快速开始 | Quick Start
+## 🚀 部署指南 | Deployment Guide
 
-### 30 秒本地启动 | 30-Second Local Start
+让你的 Agent 读取并遵循 [`deploy-axonhub`](https://github.com/looplj/axonhub-skills/blob/main/deploy-axonhub/SKILL.md) 来部署 AxonHub。
 
-```bash
-# 下载并解压（以 macOS ARM64 为例）
-curl -sSL https://github.com/looplj/axonhub/releases/latest/download/axonhub_darwin_arm64.tar.gz | tar xz
-cd axonhub_*
+---
 
-# 使用 SQLite 运行（默认）
-./axonhub
+## ⚡ 快速开始 | Quick Start
 
-# 打开 http://localhost:8090
-# 首次运行：按照初始化向导设置系统（创建管理员账号，密码至少需要 6 位）
-```
+部署完成后：
 
-就这样！现在配置你的第一个 AI 渠道，开始通过 AxonHub 调用模型。
-
-### 零代码迁移示例 | Zero-Code Migration Example
-
-**你的现有代码无需任何改动。** 只需将 SDK 指向 AxonHub：
+1. **初始化系统**
+   - 打开 Agent 返回的 AxonHub 访问地址。
+   - 按照初始化向导创建管理员账号。
+2. **添加渠道**
+   - 在 **Channels（渠道）** 中添加 AI 提供商及其 API Key。
+   - 配置支持的模型，测试连接并启用渠道。
+3. **创建 API Key**
+   - 在 **API Keys（API 密钥）** 中创建供客户端使用的 AxonHub API Key。
+4. **发起第一个请求**
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8090/v1",  # 指向 AxonHub
-    api_key="your-axonhub-api-key"        # 使用 AxonHub API 密钥
+    base_url="http://localhost:8090/v1",
+    api_key="your-axonhub-api-key"
 )
 
-# 用 OpenAI SDK 调用 Claude！
 response = client.chat.completions.create(
-    model="claude-3-5-sonnet",  # 或 gpt-4、gemini-pro、deepseek-chat...
-    messages=[{"role": "user", "content": "Hello!"}]
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello, AxonHub!"}]
 )
+
+print(response.choices[0].message.content)
 ```
 
-切换模型只需改一行：`model="gpt-4"` → `model="claude-3-5-sonnet"`。无需改动 SDK。
+更多配置和 API 示例请查看[完整文档索引](docs/zh/index.md)。
 
 ---
-
-## 🚀 部署指南 | Deployment Guide
-
-### 💻 个人电脑部署 | Personal Computer Deployment
-
-适合个人开发者和小团队使用，无需复杂配置。
-
-#### 快速下载运行 | Quick Download & Run
-
-1. **下载最新版本** 从 [GitHub Releases](https://github.com/looplj/axonhub/releases)
-   - 选择适合您操作系统的版本：
-
-2. **解压并运行**
-   ```bash
-   # 解压下载的文件
-   unzip axonhub_*.zip
-   cd axonhub_*
-
-   # 添加执行权限 (仅限 Linux/macOS)
-   chmod +x axonhub
-
-   # 直接运行 - 默认使用 SQLite 数据库
-   # 安装 AxonHub 到系统
-   ./install.sh
-
-   # 启动 AxonHub 服务
-   ./start.sh
-
-   # 停止 AxonHub 服务
-   ./stop.sh
-   ```
-
-3. **访问应用**
-   ```
-   http://localhost:8090
-   ```
-
----
-
-### 🖥️ 服务器部署 | Server Deployment
-
-适用于生产环境、高可用性和企业级部署。
-
-#### 数据库支持 | Database Support
-
-AxonHub 支持多种数据库，满足不同规模的部署需求：
-
-| 数据库 | 支持版本 | 推荐场景 | 自动迁移 | 链接 |
-|--------|----------|----------|----------|------|
-| **SQLite** | 3.0+ | 开发环境、小型部署 | ✅ 支持 | [SQLite](https://www.sqlite.org/index.html) |
-| **TiDB Cloud** | Starter | Serverless, Free tier, Auto Scale | ✅ 支持 | [TiDB Cloud](https://www.pingcap.com/tidb-cloud-starter/) |
-| **TiDB Cloud** | Dedicated | 分布式部署、大规模 | ✅ 支持 | [TiDB Cloud](https://www.pingcap.com/tidb-cloud-dedicated/) |
-| **TiDB** | V8.0+ | 分布式部署、大规模 | ✅ 支持 | [TiDB](https://tidb.io/) |
-| **Neon DB** | - | Serverless, Free tier, Auto Scale | ✅ 支持 | [Neon DB](https://neon.com/) |
-| **PostgreSQL** | 15+ | 生产环境、中大型部署 | ✅ 支持 | [PostgreSQL](https://www.postgresql.org/) |
-| **MySQL** | 8.0+ | 生产环境、中大型部署 | ✅ 支持 | [MySQL](https://www.mysql.com/) |
-
-#### 配置文件 | Configuration
-
-AxonHub 使用 YAML 配置文件，支持环境变量覆盖：
-
-```yaml
-# config.yml
-server:
-  port: 8090
-  name: "AxonHub"
-  debug: false
-
-db:
-  dialect: "tidb"
-  dsn: "<USER>.root:<PASSWORD>@tcp(gateway01.us-west-2.prod.aws.tidbcloud.com:4000)/axonhub?tls=true&parseTime=true&multiStatements=true&charset=utf8mb4"
-
-log:
-  level: "info"
-  encoding: "json"
-```
-
-环境变量：
-```bash
-AXONHUB_SERVER_PORT=8090
-AXONHUB_DB_DIALECT="tidb"
-AXONHUB_DB_DSN="<USER>.root:<PASSWORD>@tcp(gateway01.us-west-2.prod.aws.tidbcloud.com:4000)/axonhub?tls=true&parseTime=true&multiStatements=true&charset=utf8mb4"
-AXONHUB_LOG_LEVEL=info
-```
-
-详细配置说明请参考 [配置文档](config.example.yml)。
-
-#### Docker Compose 部署
-
-```bash
-# 克隆项目
-git clone https://github.com/looplj/axonhub.git
-cd axonhub
-
-# 设置环境变量
-export AXONHUB_DB_DIALECT="tidb"
-export AXONHUB_DB_DSN="<USER>.root:<PASSWORD>@tcp(gateway01.us-west-2.prod.aws.tidbcloud.com:4000)/axonhub?tls=true&parseTime=true&multiStatements=true&charset=utf8mb4"
-
-# 启动服务
-docker-compose up -d
-
-# 查看状态
-docker-compose ps
-```
-
-#### Helm Kubernetes 部署 | Helm Kubernetes Deployment
-
-使用官方 Helm Chart 在 Kubernetes 上部署 AxonHub：
-
-```bash
-# Quick installation
-git clone https://github.com/looplj/axonhub.git
-cd axonhub
-helm install axonhub ./deploy/helm
-
-# Production deployment
-helm install axonhub ./deploy/helm -f ./deploy/helm/values-production.yaml
-
-# Access AxonHub
-kubectl port-forward svc/axonhub 8090:8090
-# Visit http://localhost:8090
-```
-
-**关键配置选项：**
-
-| 参数 | 描述 | 默认 |
-|-----------|-------------|---------|
-| `axonhub.replicaCount` | 副本数 | `1` |
-| `axonhub.dbPassword` | 数据库密码 | `axonhub_password` |
-| `postgresql.enabled` | 是否启用内嵌 PostgreSQL | `true` |
-| `ingress.enabled` | 是否启用 Ingress | `false` |
-| `persistence.enabled` | 是否启用持久化存储 | `false` |
-
-有关详细配置和故障排查，请参阅 [Helm Chart 文档](deploy/helm/README.md)。
-
-#### 虚拟机部署 | Virtual Machine Deployment
-
-下载最新版本从 [GitHub Releases](https://github.com/looplj/axonhub/releases)
-
-```bash
-# 克隆项目
-git clone https://github.com/looplj/axonhub.git
-cd axonhub
-
-# 设置环境变量
-export AXONHUB_DB_DIALECT="tidb"
-export AXONHUB_DB_DSN="<USER>.root:<PASSWORD>@tcp(gateway01.us-west-2.prod.aws.tidbcloud.com:4000)/axonhub?tls=true&parseTime=true&multiStatements=true&charset=utf8mb4"
-
-# 安装
-sudo ./install.sh
-
-# 配置文件检查
-axonhub config check
-
-# 使用管理脚本管理 AxonHub
-
-# 启动
-./start.sh
-
-# 停止
-./stop.sh
-```
-
----
-
-## 📖 使用指南 | Usage Guide
-
-### 1. 初始化设置 | Initial Setup
-
-1. **访问管理界面**
-   ```
-   http://localhost:8090
-   ```
-
-2. **配置 AI 提供商**
-   - 在管理界面中添加 API 密钥
-   - 测试连接确保配置正确
-
-3. **创建用户和角色**
-   - 设置权限管理
-   - 分配适当的访问权限
-
-### 2. Channel 配置 | Channel Configuration
-
-在管理界面中配置 AI 提供商渠道。关于渠道配置的详细信息，包括模型映射、参数覆盖和故障排除，请参阅 [渠道配置指南](docs/zh/guides/channel-management.md)。
-
-### 3. 模型管理 | Model Management
-
-AxonHub 提供灵活的模型管理系统，支持通过模型关联将抽象模型映射到特定渠道和模型实现。这使您能够：
-
-- **统一模型接口** - 使用抽象模型 ID（如 `gpt-4`、`claude-3-opus`）替代渠道特定的名称
-- **智能渠道选择** - 基于关联规则和负载均衡自动将请求路由到最优渠道
-- **灵活的映射策略** - 支持精确的渠道-模型匹配、正则表达式模式和基于标签的选择
-- **基于优先级的回退** - 配置多个具有优先级的关联以实现自动故障转移
-
-关于模型管理的全面信息，包括关联类型、配置示例和最佳实践，请参阅 [模型管理指南](docs/zh/guides/model-management.md)。
-
-### 4. 创建 API Key | Create API Keys
-
-创建 API 密钥以验证您的应用程序与 AxonHub 的连接。每个 API 密钥可以配置多个配置文件（Profile），用于定义：
-
-- **模型映射** - 使用精确匹配或正则表达式模式将用户请求的模型转换为实际可用的模型
-- **渠道限制** - 通过渠道 ID 或标签限制 API 密钥可以使用的渠道
-- **模型访问控制** - 控制特定配置文件可以访问的模型
-- **配置文件切换** - 通过激活不同的配置文件即时更改行为
-
-关于 API 密钥配置文件的详细信息，包括配置示例、验证规则和最佳实践，请参阅 [API 密钥配置文件指南](docs/zh/guides/api-key-profiles.md)。
-
-### 5. AI 编程工具集成 | AI Coding Tools Integration
-
-关于如何在 OpenCode、Claude Code 与 Claude Codex 中配置与 AxonHub 的集成、排查常见问题以及结合模型配置文件工作流的最佳实践，请参阅专门的集成指南：
-- [OpenCode 集成指南](docs/zh/guides/opencode-integration.md)
-- [Claude Code 集成指南](docs/zh/guides/claude-code-integration.md)
-- [Codex 集成指南](docs/zh/guides/codex-integration.md)
-
-这些文档提供了环境变量示例、Codex 配置模板、模型配置文件说明以及工作流示例，帮助您快速完成接入。
-
----
-
-### 6. 使用 SDK | SDK Usage
-
-详细的 SDK 使用示例和代码示例，请参阅 API 文档：
-- [OpenAI API](docs/zh/api-reference/openai-api.md)
-- [Anthropic API](docs/zh/api-reference/anthropic-api.md)
-- [Gemini API](docs/zh/api-reference/gemini-api.md)
-
 
 ## 🛠️ 开发指南
 
 详细的开发说明、架构设计和贡献指南，请查看 [docs/zh/development/development.md](docs/zh/development/development.md)。
+
+---
+
+## 👥 团队 | Team
+
+<table>
+  <tr>
+    <td align="center">
+      <a href="https://github.com/looplj">
+        <img src="https://github.com/looplj.png?size=100" width="100" alt="looplj"/><br/>
+        <sub><b>looplj</b></sub>
+      </a>
+    </td>
+    <td align="center">
+      <a href="https://github.com/llc1123">
+        <img src="https://github.com/llc1123.png?size=100" width="100" alt="llc1123"/><br/>
+        <sub><b>llc1123</b></sub>
+      </a>
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -554,6 +358,7 @@ AxonHub 提供灵活的模型管理系统，支持通过模型关联将抽象模
 ## 📄 许可证 | License
 
 本项目采用多种许可证授权（Apache-2.0 和 LGPL-3.0）。详见 [LICENSE](LICENSE) 文件了解详细的项目授权说明与条款。
+
 ---
 
 <div align="center">

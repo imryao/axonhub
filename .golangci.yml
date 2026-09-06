@@ -52,6 +52,7 @@ linters:
     - depguard
     - lll
     - exhaustruct
+    - exhaustruct_v5
     - gochecknoinits
     - dupl
     - tagalign
@@ -78,7 +79,8 @@ linters:
     - dogsled
     - unqueryvet
     - predeclared
-    
+    - gomodguard
+
 
   # all available settings of specific linters
   settings:
