@@ -6,6 +6,10 @@ import (
 	"github.com/looplj/axonhub/llm"
 )
 
+var rawCreateRequestFields = []string{"client_metadata", "context_management", "conversation", "moderation", "prompt", "prompt_cache_options"}
+
+var rawCompactRequestFields = []string{"previous_response_id", "prompt_cache_options", "prompt_cache_retention", "service_tier"}
+
 func attachOpenAIResponsesRequestExtensions(chatReq *llm.Request, req *Request, rawBody []byte) {
 	if chatReq == nil || req == nil {
 		return
@@ -18,13 +22,14 @@ func attachOpenAIResponsesRequestExtensions(chatReq *llm.Request, req *Request, 
 	}
 	requestExt := &llm.OpenAIResponsesRequestExtensions{
 		ReasoningContext: reasoningContext,
+		RawFields:        selectRawRequestFields(raw.Fields, rawCreateRequestFields),
 		RawTools:         buildRawOnlyToolFragments(req.Tools, raw.Tools),
 		ToolSignatures:   buildRepresentedToolSignatures(req.Tools),
 		RawToolChoice:    rawUnsupportedToolChoice(req.ToolChoice, raw.ToolChoice),
 		RawInputItems:    buildRawOnlyInputFragments(req.Input, raw.InputItems),
 	}
 
-	if requestExt.ReasoningContext == "" && len(requestExt.RawTools) == 0 && len(requestExt.RawToolChoice) == 0 && len(requestExt.RawInputItems) == 0 {
+	if requestExt.ReasoningContext == "" && len(requestExt.RawFields) == 0 && len(requestExt.RawTools) == 0 && len(requestExt.RawToolChoice) == 0 && len(requestExt.RawInputItems) == 0 {
 		return
 	}
 
@@ -36,6 +41,7 @@ func attachOpenAIResponsesRequestExtensions(chatReq *llm.Request, req *Request, 
 }
 
 type rawRequestFragments struct {
+	Fields     map[string]json.RawMessage
 	Tools      []json.RawMessage
 	ToolChoice json.RawMessage
 	InputItems []json.RawMessage
@@ -54,6 +60,10 @@ func parseRawRequestFragments(rawBody []byte) rawRequestFragments {
 	if err := json.Unmarshal(rawBody, &raw); err != nil {
 		return rawRequestFragments{}
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &fields); err != nil {
+		return rawRequestFragments{}
+	}
 
 	var inputItems []json.RawMessage
 	if len(raw.Input) > 0 && json.Unmarshal(raw.Input, &inputItems) != nil {
@@ -61,10 +71,24 @@ func parseRawRequestFragments(rawBody []byte) rawRequestFragments {
 	}
 
 	return rawRequestFragments{
+		Fields:     fields,
 		Tools:      raw.Tools,
 		ToolChoice: raw.ToolChoice,
 		InputItems: inputItems,
 	}
+}
+
+func selectRawRequestFields(fields map[string]json.RawMessage, names []string) map[string]json.RawMessage {
+	selected := make(map[string]json.RawMessage)
+	for _, name := range names {
+		if value, ok := fields[name]; ok {
+			selected[name] = cloneRaw(value)
+		}
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+	return selected
 }
 
 func buildRepresentedToolSignatures(tools []Tool) []string {
@@ -219,6 +243,11 @@ func marshalRequestPayload(payload Request, llmReq *llm.Request) ([]byte, error)
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return nil, err
+	}
+	for key, value := range requestExt.RawFields {
+		if _, exists := obj[key]; !exists && len(value) > 0 {
+			obj[key] = cloneRaw(value)
+		}
 	}
 
 	if tools, ok := mergeRawOnlyTools(obj["tools"], requestExt); ok {

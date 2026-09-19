@@ -18,6 +18,7 @@ import (
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/streams"
+	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 )
 
 const (
@@ -101,6 +102,7 @@ func (handlers *ChatCompletionHandlers) ChatCompletionWithRequest(c *gin.Context
 
 	if result.ChatCompletion != nil {
 		resp := result.ChatCompletion
+		copyCodexTurnStateHeader(c.Writer.Header(), resp.Headers)
 
 		contentType := "application/json"
 		if ct := resp.Headers.Get("Content-Type"); ct != "" {
@@ -125,6 +127,9 @@ func (handlers *ChatCompletionHandlers) ChatCompletionWithRequest(c *gin.Context
 		c.Header("Access-Control-Allow-Origin", "*")
 
 		stream := newUpstreamErrorStream(ctx, result.ChatCompletionStream, handlers.ChatCompletionOrchestrator.SystemService)
+		if genericReq != nil && strings.HasSuffix(genericReq.Path, "/responses") {
+			stream = primeCodexTurnStateHeader(c.Writer.Header(), stream)
+		}
 		if handlers.StreamWriter != nil {
 			handlers.StreamWriter(c, stream)
 			return
@@ -132,6 +137,64 @@ func (handlers *ChatCompletionHandlers) ChatCompletionWithRequest(c *gin.Context
 
 		writeSSEStream(c, stream, FormatStreamError, handlers.sseKeepAlive, handlers.sseHeartbeatFormat)
 	}
+}
+
+func copyCodexTurnStateHeader(dst, src http.Header) {
+	if dst == nil || src == nil {
+		return
+	}
+
+	if value := src.Get(codex.TurnStateHeader); value != "" {
+		dst.Set(codex.TurnStateHeader, value)
+	}
+}
+
+// primedStream keeps the first upstream event available after response headers
+// have been copied to the downstream writer. HTTP stream executors expose
+// transport headers on that first event, and SSE headers must be sent before
+// the first flush.
+type primedStream struct {
+	stream  streams.Stream[*httpclient.StreamEvent]
+	first   *httpclient.StreamEvent
+	pending bool
+}
+
+func primeCodexTurnStateHeader(dst http.Header, stream streams.Stream[*httpclient.StreamEvent]) streams.Stream[*httpclient.StreamEvent] {
+	if stream == nil || !stream.Next() {
+		return stream
+	}
+
+	first := stream.Current()
+	if first != nil {
+		copyCodexTurnStateHeader(dst, first.Headers)
+	}
+
+	return &primedStream{stream: stream, first: first, pending: true}
+}
+
+func (s *primedStream) Next() bool {
+	if s.pending {
+		return true
+	}
+
+	return s.stream.Next()
+}
+
+func (s *primedStream) Current() *httpclient.StreamEvent {
+	if s.pending {
+		s.pending = false
+		return s.first
+	}
+
+	return s.stream.Current()
+}
+
+func (s *primedStream) Err() error {
+	return s.stream.Err()
+}
+
+func (s *primedStream) Close() error {
+	return s.stream.Close()
 }
 
 // StreamErrorFormatter formats a stream error into a JSON-serializable object for SSE error events.
