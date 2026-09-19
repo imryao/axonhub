@@ -73,6 +73,27 @@ func TestCodexOutbound_StreamAcceptHeader(t *testing.T) {
 	assert.Equal(t, "Bearer "+accessToken, headers.Get("Authorization"))
 }
 
+func TestCodexOutbound_TurnStateHeaderPassesThrough(t *testing.T) {
+	ctx := context.Background()
+	outbound := newTestCodexOutbound(t)
+	body := []byte(`{"model":"gpt-5-codex","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	rawRequest, err := http.NewRequest(http.MethodPost, "http://localhost/v1/chat/completions", bytes.NewReader(body))
+	require.NoError(t, err)
+	rawRequest.Header.Set("Content-Type", "application/json")
+	rawRequest.Header.Set(TurnStateHeader, "ts-1")
+	request, err := httpclient.ReadHTTPRequest(rawRequest)
+	require.NoError(t, err)
+
+	inbound, err := openai.NewInboundTransformer().TransformRequest(ctx, request)
+	require.NoError(t, err)
+	inbound.RawRequest = request
+
+	outboundRequest, err := outbound.TransformRequest(ctx, inbound)
+	require.NoError(t, err)
+	outboundRequest = httpclient.MergeInboundRequest(outboundRequest, request)
+	require.Equal(t, "ts-1", outboundRequest.Headers.Get(TurnStateHeader))
+}
+
 func TestCodexOutbound_RejectsPassThroughBodyWithTokenLimitFields(t *testing.T) {
 	tests := []struct {
 		name string
