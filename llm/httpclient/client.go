@@ -420,6 +420,15 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 	}
 
 	stream := decoderFactory(ctx, rawResp.Body)
+	responseHeaders := rawResp.Header.Clone()
+	first := true
+	stream = streams.Map(stream, func(event *StreamEvent) *StreamEvent {
+		if event != nil && first {
+			event.Headers = responseHeaders
+			first = false
+		}
+		return event
+	})
 
 	return stream, nil
 }
